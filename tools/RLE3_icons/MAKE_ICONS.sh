@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # Copyright © 2019, 2020, 2021, 2022 HackEDA, Inc.
 
 # Licensed under the WiPhone Public License v.1.0 (the "License"); you
@@ -12,11 +14,12 @@
 # governing permissions and limitations under the License.
 
 
-#!/bin/bash
 
 OUTPUT_FN="icons.h"
 
 declare -a array=(
+        "checkicon"
+        "doubletickicon"
         "lock"
         # Header icons
 	"phone_small_w" "phone_small_w_crossed"     # SIP icons
@@ -65,14 +68,14 @@ success=1
 for (( i=0; i<${cnt}; i++ ));
 do
 	echo "${array[$i]}"
-	./RLE3.py "${array[$i]}.png" "${array[$i]}.rle3"
+	python3	./RLE3.py "${array[$i]}.png" "${array[$i]}.rle3"
         if [ $? -ne 0 ]
         then 
             echo "ERROR: failed to convert PNG to RLE3; make sure ${array[$i]}.png exists"
             success=0
             break 
         fi
-	./to_c.py "${array[$i]}.rle3" "${array[$i]}.h"
+	python3 ./to_c.py "${array[$i]}.rle3" "${array[$i]}.h"
 	awk -v NAME="${array[$i]}"  'NR==1 && $0 !~ "PROGMEM" { print ""; gsub(/data/, "icon_" NAME); $4 = $4 " PROGMEM" } 1' "${array[$i]}".h > .tmp.h; mv .tmp.h "${array[$i]}".h
 	fns="$fns ${array[$i]}.h"
 	binary_fns="$binary_fns ${array[$i]}.rle3"

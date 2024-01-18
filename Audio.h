@@ -1,5 +1,5 @@
 /*
-Copyright © 2019, 2020, 2021, 2022 HackEDA, Inc.
+Copyright © 2019, 2020, 2021, 2022, 2023 HackEDA, Inc.
 Licensed under the WiPhone Public License v.1.0 (the "License"); you
 may not use this file except in compliance with the License. You may
 obtain a copy of the License at
@@ -41,12 +41,12 @@ governing permissions and limitations under the License.
 
 #define DR_WAV_NO_CONVERSION_API
 #define DR_WAV_NO_STDIO
-#include "src/audio/dr_wav.h"
+#include "audio/dr_wav.h"
 
 // These are used in WiPhone.ino
-#include "src/audio/g722_encoder.h"
-#include "src/audio/g722_decoder.h"
-#include "src/audio/g711.h"
+#include "audio/g722_encoder.h"
+#include "audio/g722_decoder.h"
+#include "audio/g711.h"
 
 extern AUDIO_CODEC_CLASS  codec;
 
@@ -55,6 +55,7 @@ extern AUDIO_CODEC_CLASS  codec;
 
 #define STP_SILENT_PERIOD 60000  // to detect rtp silent
 extern uint8_t    rtpSilentPeriod;  // for detection of other party rtp stream silent
+extern uint32_t    rtpSilentScan;
 #define RTP_SILENT_ON     0x02
 #define RTP_SILENT_OFF    0x00
 /* Description
@@ -186,9 +187,15 @@ public:
   // Volume range in the audio codec chip
   static const int8_t MaxVolume = 6;
   static const int8_t MuteVolume = -69;
+  static const int8_t MuteVolumeEarSpkr = -54;
 
   // Software limit for the loudspeaker (otherwise can burn)
+  static const int8_t MuteVolumeLoudSpkr = -18;
+  static const int8_t MuteVolumeVoiceLoudSpkr = -60;
   static const int8_t MaxLoudspeakerVolume = 0;
+
+  static const int8_t MaxPercentVolume = 100;
+  static const int8_t MutePercentVolume = 0;
 
   // Profiling
   //LinearArray<CycleInfo_t, false> profile;

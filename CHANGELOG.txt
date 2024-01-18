@@ -1,33 +1,136 @@
-0.8.30:
+0.8.32
+    Major:
+    - Added acknowledge mechanism to LORA messages to see ticks at left of messages (sent: one tick, delivered: dbl ticks) #51 #113
+    - Added re-sending periodically the un-sent messages with 20 s period #52
+    - Change default audio output to ear speaker during call and enable audio out to loudspeaker during call #37
+    - Fixed: Sip state icon doesn't change on SIP server down #112
+    - Fixed: Unmaking primary doesn't work exactly #125
+    - Fixed: 486 Busy Here when callee rejects call #136
+    - Software Examples and menu for them added as selectable with a precompiler switch
+    - To adapt new languages, the dummy macro such as _() is added and applied to all translatable strings. Removed build scripts as they are added to build server.
+    - ACK method is added to LoRa messages. Added a check for size of LoRa address less than 6 bytes #51
+    - Added the un-delivered LoRa msgs to outgoing msgs list on startup #52
+    - Fixed SPIFFS problem by detaching LoRa interrupts while doing SPIFFS (Storage) operations. So, "sometimes disappearing messages" and crash problems do not occur any more #52
+    - Code files which is not needed to edit by WiPhone users/developers are moved from firmware to SDK
+    - Added SDK version check into the firmware because it requires the detach/attachInterrupts methods within the RH_RF95 class and the commit that moves files to SDK #52
+    - Tested with sending 10 LoRa msgs to a closed WiPhone, it received them after opening it, then double ticked at the sender side #52
+    - Added new setting page with name Lora Settings. Loaded Lora settings at start. Lora On/Off feature and frequency selection are implemented #63
+    - Added checks in order not to send LoRa messages while LoRa is OFF #63
+    - Added a popup for sending LoRa msg while LoRa is OFF to inform about that the message will be sent after LoRa is ON (avoids freezing) #63
+    - Problems with settings for brightness, dim, sleep and lock are fixed #80
+    - Audio setting&toggling problems including hearable max-min limits are fixed and audio levels are displayed as percentages #94
+    - Added a row for "Loudspeaker media" and its audio is limited to [-66:-6] db #94
+    - Added functionality for increasing and decreasing the volume of the ringtone while ringing #94
+    - Fixed the problems related to volume control during call #94
+    - Fixed: when pressing select button during call, audio levels is displayed #94
+    - Fix of equalizer settings for future mp3 #94
+    - A crash problem (related to failed calls) is solved by adding a null check within tinySIP.
+    - Fixed: Call immediately ending after trying to call after a long period #135
+    - Feature: Scrolling to the typed character within PhonebookApp with case-insensitive manner #142
+    - Added a timeout for ringing for outgoing calls and incoming calls #154
+    - Fixed: Scan Networks disconnects WiFi.
+    - Added timeout for WiFi connection to config.h, enhanced the WiFi connection error messages #172
+    - ADD SIP_TLS to the transport support to SDK (Repo: WiPhone-board, branch: 0xFF-Grid)
+    - Fixed: Memory test functionality is re-implemented so that it uses whole memory. Self Test Improvements for PCBA Testing. #211
+    - Fixed: Fixed loading problem of LoRa settings at start because of inverse logic of strcmp of the field v. LoRa on-off/ini problem after uploading firmware and/or sketch data.
+    - Fixed: The lora when reboot for first time or when erasing flash memory fix the effect of changing the frequency.
+    - Fixed: ENABLE_DAUGHTER_3V3 problem.
+    - Fixed: Reboot when no SIP user name and server. #181
+    - Fixed: 1- consistency of sent messages ticks 2- empty inbox crash when receving message 3- sent messages are not saved till the send trials 4- lora misconfigured doesn't work with soft reboot.
+    - Fixed: Sketch data is updated as it has wifi section so that the ota checks are done at setup after uploadding sjketch datasketch. #77
+    - Fixed: OK footer button works on Forget button. #179
+    - Fixed: WiFi logic when booting no ota update incase the wifi is off or no pref_net no trial to connect to wifi in case wifi off or no prefered pref_net decrease no of trial of wifi connection to 5 fix edit netwrok credentials when wifi is off>reboot>turnon wifi > enter edit network. there was no credentials
+    - Fixed: Button size adjusted with texts. Connect-disconnect text changed with current network info. (in Edit Network page)  #203
+    - Fixed: Freeze when the other party is not reachable and no ack received (LoRa).
+    - Fixed: WiFiSettings page has only on-off selection, EditNetwork page has not on-off selection and all function keys are connected to true functions.
+    - Fixed: New LoRa freeze problems.
+    - Fixed: Crashing while sending LoRa messages each after. Outbox cannot display some messages. Fix achieved by wrapping the gui.processEvent by detach-attach LoRa interrupts.
+    - Fixed: Sending/receiving lora message between old lora and new lora with ARQ algorithm.
     Minor:
-    - calling now defaults to the ear speaker instead of the loudspeaker, and volume can be controlled during a call by pressing up/down arrows
-    - brightness correctly restored on boot
-    - manage SIP better when wifi disconnects or SIP server becomes inactive\
-    
+    - Added error popups for errors during sending SIP messages (adding double ticks not implemented yet) #51 #113
+    - Scanning WiFi signals is disabled while WiFi is OFF #42
+    - Fixed: Can't return from MyApp Demo App #67
+    - Fixed partially: Message reception time is fixed for time offset but no time server or no WiFi cases need fixing #75
+    - Fixed indirectly by popups: Infinite loop on sending message off wifi #92
+    - Fixed: Audio Settings Not Applying Correctly (caller case still needs fixing) #94
+    - Fixed indirectly: Muted volume or muted ring-tone problems #103
+    - Fixed: Calling infinitely in erronous cases #146
+    - Fixed: keypad backlight problem with the Power button
+    - Fixed: MyApp seems twice
+    - Fixed: F4 button function
+    - Contacts without server extension (in its url) are completed by using the primary SIP account #113
+    - Added popups for SIP message errors. Added error popups to SIP msg sending no WiFi/SIP #113
+    - Fixed: Cursor color was the same with the background, so it was not visible. It is set to foreground color #140
+    - Fixed: Clear button should exit dial screen if the input is empty #141
+    - USER_SERIAL commented in hardware.h, users can uncomment it if they want to use it.
+    - Fixed a crash case: Completing sip url with the current sip account but no primary account set.
+    - Fixed: Scan WiFi networks page displays only Scanning... text instead of WiFi list when the last connected WiFi is not available #171
+    - Fixed: no netwrok when scanning WiFi #171
+    - Fixed: Enhanced the compiler error message for wrong SDK version #173
+    - Fixed: Added a ResendUndelivereds choice to resend a LoRa message periodically if it is undelivered #174
+    - ResendUndelivereds choice is moved to Lora Config Settings page
+    - Fixed: the Edit network APP footer to display the correct state for WiFI #179
+    - Fixed: Stop re-sending undelivered LoRa messages after a timeout #180
+    - Fixed: infinite reboot after uploading a fresh sketch data #188
+    - Fixed: when reply lora message, it adds sip extension to LoRa message address #191
+    - Fixed: when WiFi_OFF, pressing left buttons cause rebooting and Right buttons has malfunctionality #192
+    - Fixed: Lora settings app display footer dipslay now "Back" instead of "clear" and also the back button works now #195
+    - Fixed: In Empty “Inbox” and “Sent” Folders in “Messages” Menu, OK/Select button shouldn't be enabled #197
+    - Fixed: Remove resend undeliverable choice (LoRa settings).
+    - Fixed: Empty SIP URL check has been broken because of adding sip server to an empty (or 'sip:' only) 'To' field.
+    - Fixed: Added a check before delay of 500ms within connection trial loop in setup. (slow start problem) #77
+    - Fixed: Reload messages. The Sent folder is not updated after sending message or replying message. (inbox and outbox refresh problems)
+    - Popup texts are enhanced with respect to English language.
+    - Fixed: Send/receive messages after entering diagnostic app.
+    - Use prod firmware url
+
+0.8.31
+    Minor:
+    - Added a popup widget for error messages, etc.
+    - Inform user if WiFi password is wrong
+    - Add WiFi enable/disable switch
+    - Disable WiFi scanning when WiFi is off
+    - Fix threading bug that freezes the Edit Network screen when WiFi is on and the network credentials are incorrect
+    - Removed crackling noise immediately after answering call from WiPhone (mic gain)
+    - Change command sequence to 32 bit int. Freeswitch uses a 32 bit counter for this.
+    - Add timeout to terminate call even if server fails to ack nonexistant/unregistered callee.
+    - Fix bug where the keypad backlight doesn't turn on when pressing a number key after pressing the back button.
+    - Fixed: Edit Network page freezes on connecting / disconnecting WiFi from central “OK” button #204
+    - Fixed: Don't save a WiFi network before trying to connect it and ensure the validity of its password and ssid #203
+    - Fixed: Problems with battery icon charging progress in some applitations #202
+    - Fixed: WiFi Connect / Disconnect Issue #201
+
+0.8.30:
+    Major:
+    - UDP SIP
+    Minor:
+    - Calling now defaults to the ear speaker instead of the loudspeaker, and volume can be controlled during a call by pressing up/down arrows
+    - Brightness correctly restored on boot
+    - Manage SIP better when wifi disconnects or SIP server becomes inactive
 
 0.8.29:
     Major:
-    - added UDP SIP. currently only selectable at compile time (in config.h). (Issue #79)
+    - added UDP SIP. currently only selectable at compile time (in config.h).
     Minor:
-	- RC car directions (Issue #64).
-	- Added $ sign and other symbols to "*" key. Now "*" key supports these symbols: .,!?@$/+-=%^ _:;'*#) (Issue #95)
-	- Calling is not permitted when WiFi is not connected (Issue #69)
-	- Add popups for failed calls: no wifi conn, no sip conn, no sip uri (Issue #68 and #69)
+	- RC car directions.
+	- Added $ sign and other symbols to "*" key. Now "*" key supports these symbols: .,!?@$/+-=%^ _:;'*#)
+	- Calling is not permitted when WiFi is not connected
+	- Add popups for failed calls: no wifi conn, no sip conn, no sip URI
 	- Fixed WiFiClient (tcp) connect call blocks the GUI. restored the connect timeout
 	- Fixed crash when unable to connect with tcp to the primary SIP server. Absence of virtual destructor of the base class Connection was causing this crash.
-	- Allow complete call termination even when the caller hangs up before callee responds. (Issue #38)
-	- UI doesn't freeze (ensureIpConnection() should not block.) (Issue #109)
-	- Add widget to allow switching between TCP and UDP SIP at run time. (Issue #79)
-	- Disable vibration after rejecting a received call using the End Call button. (Issue #96)
-	- Issue #11 ("sip:" in address book) Fixed.
+	- Allow complete call termination even when the caller hangs up before callee responds.
+	- UI doesn't freeze (ensureIpConnection() should not block.)
+	- Add widget to allow switching between TCP and UDP SIP at run time.
+	- Disable vibration after rejecting a received call using the End Call button.
+	- Automatically add "sip:" to URI in address book if needed
 	- Fixed menu unreponsive while WiPhone tries to reconnect to a SIP server. 10s wait before attempting reconnect.
     - Fixed: WiPhone crash when there is multiple multimedia descriptors 'm' in SDP message
     - Detect if the other party is disconnects, then destroy the dialog and terminate the call
     - Improve SIP Registering when WIFI is disconnected and reconnected
     - Fixed crash on sending invite for an unregistered callee
-    - Handle error when trying to call a contact without sip info (Issue #68)
-    - Allow hang up even when not connected to WiFi. (Issue #69)
-	- Removed old board definitions, added #define for pogo pins and moved #define LORA_MESSAGING to Hardware.h. Partially Fixed. (Issue #66)
+    - Handle error when trying to call a contact without sip info
+    - Allow hang up even when not connected to WiFi.
+	- Removed old board definitions, added #define for pogo pins and moved #define LORA_MESSAGING to Hardware.h. Partially Fixed.
 	- Print SIP logs correctly, not one character per line.
 
 0.8.28:

@@ -1,5 +1,5 @@
 /*
-Copyright © 2019, 2020, 2021, 2022 HackEDA, Inc.
+Copyright © 2019, 2020, 2021, 2022, 2023 HackEDA, Inc.
 Licensed under the WiPhone Public License v.1.0 (the "License"); you
 may not use this file except in compliance with the License. You may
 obtain a copy of the License at
@@ -14,13 +14,13 @@ governing permissions and limitations under the License.
 
 #ifndef _WIPHONE_GUI_H_
 #define _WIPHONE_GUI_H_
-
+#define _(X) X //FIXME: move this into a header file.
 #include "src/TFT_eSPI/TFT_eSPI.h"
 #include <Arduino.h>
 #include "Storage.h"
 #include <random>
 #include "Networks.h"
-#include "config.h"
+#include "WiPhoneConfig.h"
 #include "helpers.h"
 #include "Hardware.h"
 #include "src/assets/fonts.h"
@@ -30,6 +30,7 @@ governing permissions and limitations under the License.
 #include "Audio.h"
 #include "FairyMax.h"
 #include "ota.h"
+#include "lora.h"
 #include "driver/uart.h"
 #include "soc/uart_struct.h"
 
@@ -37,6 +38,10 @@ using namespace std;
 
 #define LCD TFT_eSPI
 extern LCD* static_lcd;      // a hack for the LCD to be usable from static callbacks
+extern Lora lora;
+
+extern bool backupWiFiConnected;
+extern char *backupConnectedSsid;
 
 // Pixel colors
 #define WHITE       TFT_WHITE     // 0xFFFF
@@ -138,6 +143,8 @@ typedef uint16_t colorType;
 #define SCREEN_DIM_EVENT         0x8780     // AppID == 0 means GUI class itself
 #define SCREEN_SLEEP_EVENT       0x8680     // AppID == 0 means GUI class itself
 #define UNLOCK_CLEAR_EVENT       0x8880     // AppID == 0 means GUI class itself
+#define MESSAGES_ACK_RECVD_EVENT 0x4082
+#define MESSAGE_SENT_EVENT       0x4083
 typedef uint16_t EventType;
 
 #define NONKEY_EVENT_ONE_OF(e, flags)    ((e & 0x80) && ((e & 0xFF7F) & (flags)))        // only for non-keyboard events
@@ -191,7 +198,7 @@ enum class CallState {
   BeingInvited,     // notifying user of the incoming invite (the phone rings)
   Accept,           // the user has pressed ACCEPT button  -> send 200 OK
   Decline,          // user declined incoming call
-
+  Busy,
   Error,
 };
 
@@ -214,6 +221,10 @@ public:
   char inputSeq[MAX_INPUT_SEQUENCE+1];
   int32_t msAppTimerEventPeriod;
   uint32_t msAppTimerEventLast;
+  bool disableAutoTurnOnKeypadLights = false;
+
+  //NEW APP STATES
+  int myappstate = 0;
 
   void setInputState(InputType newInputType);
 
@@ -342,6 +353,13 @@ typedef enum ActionID : uint16_t {
   // My Section
   GUI_APP_MYAPP,      // add your app like this
   GUI_APP_OTA,
+  GUI_APP_LEDEXAMPLEAPP,
+  GUI_APP_ButtonPressApp,
+  GUI_APP_BatteryApp,
+  GUI_APP_PeriTestApp,
+  //GUI_APP_ScreenshotApp, Not requested to be merged
+  GUI_APP_RealTimeApp,
+  GUI_APP_LoRaApp,
 
   // Interface
   GUI_APP_MENU,
@@ -370,12 +388,14 @@ typedef enum ActionID : uint16_t {
   GUI_APP_RECORDER,
 
   // Configs
+  GUI_APP_WIFISETTINGS,
   GUI_APP_EDITWIFI,
   GUI_APP_NETWORKS,
   GUI_APP_AUDIO_CONFIG,
   GUI_APP_WIFI_CONFIG,
   GUI_APP_TIME_CONFIG,
   GUI_APP_SCREEN_CONFIG,
+  GUI_APP_LORA_CONFIG,
 
   // Test apps
   GUI_APP_CIRCLES,
@@ -615,6 +635,9 @@ public:
   void redraw(LCD &lcd, uint16_t screenOffX, uint16_t screenOffY, uint16_t windowWidth, uint16_t windowHeight);
   bool readPressed();
   static int32_t textWidth(const char* str);
+  void setWidth(uint16_t w) {
+    widgetWidth = w;
+  }
 protected:
   const char* titleDyn = NULL;
   uint8_t fontSize;
@@ -705,6 +728,9 @@ public:
     leftButtonName = left;
     rightButtonName = right;
   };
+  const char* getLeftButton() {
+    return leftButtonName;
+  }
   bool processEvent(EventType event) {
     return false;
   }
@@ -1011,6 +1037,7 @@ class MenuWidget : public FocusableWidget {
 public:
   static const uint8_t DEFAULT_STYLE = 1;
   static const uint8_t ALTERNATE_STYLE = 2;
+  //static const uint8_t UNSENT_STYLE = 3;
 
   MenuWidget(uint16_t xPos, uint16_t yPos, uint16_t width, uint16_t height, const char* emptyMessage,
              SmoothFont* font=NULL, uint8_t itemsPerScreen=0, uint16_t leftOffset=0, bool opaque=true);
@@ -1105,7 +1132,7 @@ public:
 
 class WiPhoneApp {
 public:
-  WiPhoneApp(LCD& disp, ControlState& state);
+  WiPhoneApp(LCD& disp, ControlState& state, HeaderWidget* header=nullptr, FooterWidget* footer=nullptr);
   virtual ~WiPhoneApp();
   virtual ActionID_t getId() {
     return NO_ACTION;
@@ -1138,6 +1165,19 @@ public:
   void addInlineLabelYesNo(uint16_t &yOff, uint16_t labelWidth, LabelWidget*& label, YesNoWidget*& input, const char* labelText);
   void addRuler(uint16_t &yOff, RulerWidget*& ruler, uint16_t addOffset = 3);
 
+
+  HeaderWidget* getHeader() {
+    return header;
+  }
+  FooterWidget* getFooter() {
+    return footer;
+  }
+
+protected:
+  HeaderWidget* header;
+  FooterWidget* footer;
+
+
 protected:
   LCD& lcd;
   ControlState& controlState;       // TODO: make this a global variable?
@@ -1152,6 +1192,9 @@ class FocusableApp {
 public:
   FocusableApp(int size) : focusableWidgets(size) {};
   void addFocusableWidget(FocusableWidget* w);
+  void clearFocusables() {
+    focusableWidgets.clear();
+  }
   void nextFocus(bool forward=true);
   FocusableWidget* getFocused();
   void setFocus(FocusableWidget* w);
@@ -1169,9 +1212,6 @@ public:
     return true;
   }
 
-protected:
-  HeaderWidget* header;
-  FooterWidget* footer;
 };
 
 class ThreadedApp : public WiPhoneApp {
@@ -1245,6 +1285,170 @@ protected:
   LabelWidget*  demoCaption;
   LabelWidget*  debugCaption;
 };
+#ifdef SOFTWARE_EXAMPLES
+class LEDExampleApp : public WindowedApp {
+public:
+  LEDExampleApp( LCD& disp, ControlState& state, HeaderWidget* header, FooterWidget* footer);
+  virtual ~LEDExampleApp();
+  ActionID_t getId() {
+    return GUI_APP_LEDEXAMPLEAPP;
+  };
+  appEventResult processEvent(EventType event);
+  void redrawScreen(bool redrawAll = false);
+  void changeState(int i);
+  void getState();
+
+  int16_t LEDPINS[12] = {EXTENDER_PIN(10), EXTENDER_PIN(11),38, 32, EXTENDER_PIN(12), EXTENDER_PIN(13), 12, 13, EXTENDER_PIN(14), EXTENDER_PIN(15), 27, 14}; //put pin values here
+  bool LEDSTATE[12] = {false, false, false, false, false, false, false, false, false, false, false, false};
+  int sel = 0;
+  int xold,yold;
+protected:
+  static const int EXIT_CNT = 5;
+  ButtonWidget* bbKeys[12];
+  // uint8_t keyPressed[25];
+  bool anyKeyPressed;
+  //MultilineTextWidget* details;
+  bool screenInited = false;
+  const colorType redBg = 0xf9a6;         // 255, 55, 55
+  const colorType redBorder = TFT_RED;
+  const colorType greenBg = TFT_GREEN;
+  const colorType greenBorder = 0x5c0;    // 0, 185, 0
+  const colorType yellowBg = TFT_YELLOW;
+  const colorType yellowBorder = 0xb580;  // 177, 177, 0
+  const colorType greyBg = GRAY_50;
+  const colorType greyBorder = GRAY_33;
+  const colorType blueBg = GRAY_50 | TFT_BLUE;
+  const colorType blueBorder = GRAY_33 | (TFT_BLUE >> 1);
+};
+
+class ButtonPressApp : public WindowedApp {
+public:
+  ButtonPressApp( LCD& disp, ControlState& state, HeaderWidget* header, FooterWidget* footer);
+  virtual ~ButtonPressApp();
+  ActionID_t getId() {
+    return GUI_APP_ButtonPressApp;
+  };
+  appEventResult processEvent(EventType event);
+  void redrawScreen(bool redrawAll = false);
+  void showButtonPress(String showString);
+protected:
+  bool anyKeyPressed;
+  bool screenInited = false;
+  LabelWidget* label;
+};
+
+class BatteryApp : public WindowedApp {
+public:
+  BatteryApp( LCD& disp, ControlState& state, HeaderWidget* header, FooterWidget* footer);
+  virtual ~BatteryApp();
+  ActionID_t getId() {
+    return GUI_APP_BatteryApp;
+  };
+  appEventResult processEvent(EventType event);
+  void redrawScreen(bool redrawAll = false);
+  void showInfo(String showString);
+  String show_voltage;
+  String show_connection;
+  String show_battery;
+  LabelWidget* label1;
+  LabelWidget* label2;
+  LabelWidget* label3;
+protected:
+  bool anyKeyPressed;
+  bool screenInited = false;
+
+
+};
+
+class PeriTestApp : public WindowedApp {
+public:
+  PeriTestApp( LCD& disp, ControlState& state, HeaderWidget* header, FooterWidget* footer);
+  virtual ~PeriTestApp();
+  ActionID_t getId() {
+    return GUI_APP_PeriTestApp;
+  };
+  appEventResult processEvent(EventType event);
+  void redrawScreen(bool redrawAll = false);
+  void changeState(int i);
+  bool PERISTATE[2] = {false, false};
+  int sel = 0;
+  int value_motor = 0;
+  int xold,yold;
+protected:
+  static const int EXIT_CNT = 5;
+  ButtonWidget* bbKeys[2];
+  // uint8_t keyPressed[25];
+  bool anyKeyPressed;
+  //MultilineTextWidget* details;
+  bool screenInited = false;
+  const colorType redBg = 0xf9a6;         // 255, 55, 55
+  const colorType redBorder = TFT_RED;
+  const colorType greenBg = TFT_GREEN;
+  const colorType greenBorder = 0x5c0;    // 0, 185, 0
+  const colorType yellowBg = TFT_YELLOW;
+  const colorType yellowBorder = 0xb580;  // 177, 177, 0
+  const colorType greyBg = GRAY_50;
+  const colorType greyBorder = GRAY_33;
+  const colorType blueBg = GRAY_50 | TFT_BLUE;
+  const colorType blueBorder = GRAY_33 | (TFT_BLUE >> 1);
+};
+class RealTimeApp : public WindowedApp,FocusableApp {
+public:
+  RealTimeApp( LCD& disp, ControlState& state, HeaderWidget* header, FooterWidget* footer);
+  virtual ~RealTimeApp();
+  ActionID_t getId() {
+    return GUI_APP_RealTimeApp;
+  };
+  appEventResult processEvent(EventType event);
+  void redrawScreen(bool redrawAll = false);
+  void showTimePress();
+  void showDatePress();
+  void changeState(int i);
+  bool PERISTATE[2] = {false, false};
+  int sel = 0;
+  int xold,yold;
+protected:
+  LabelWidget* label;
+  static const int EXIT_CNT = 5;
+  ButtonWidget* bbKeys[2];
+  // uint8_t keyPressed[25];
+  bool anyKeyPressed;
+  //MultilineTextWidget* details;
+  bool screenInited = false;
+  const colorType redBg = 0xf9a6;         // 255, 55, 55
+  const colorType redBorder = TFT_RED;
+  const colorType greenBg = TFT_GREEN;
+  const colorType greenBorder = 0x5c0;    // 0, 185, 0
+  const colorType yellowBg = TFT_YELLOW;
+  const colorType yellowBorder = 0xb580;  // 177, 177, 0
+  const colorType greyBg = GRAY_50;
+  const colorType greyBorder = GRAY_33;
+  const colorType blueBg = GRAY_50 | TFT_BLUE;
+  const colorType blueBorder = GRAY_33 | (TFT_BLUE >> 1);
+
+};
+
+class LoRaTestApp : public WindowedApp {
+public:
+  LoRaTestApp( LCD& disp, ControlState& state, HeaderWidget* header, FooterWidget* footer);
+  virtual ~LoRaTestApp();
+  ActionID_t getId() {
+    return GUI_APP_LoRaApp;
+  };
+  appEventResult processEvent(EventType event);
+  void redrawScreen(bool redrawAll = false);
+protected:
+  static const int EXIT_CNT = 5;
+  ButtonWidget* bbKeys[2];
+  bool anyKeyPressed;
+  bool screenInited;
+
+  RHSoftwareSPI* loraSPI;
+  RH_RF95* rf95;
+
+  LabelWidget* label1;
+};
+#endif // if SOFTWARE_EXAMPLES
 
 class UartPassthroughApp :  public WindowedApp, FocusableApp {
 public:
@@ -1399,16 +1603,16 @@ public:
   appEventResult processEvent(EventType event);
   void redrawScreen(bool redrawAll=false);
 
-protected:
-  static const bool INCOMING = true;
-  static const bool SENT = false;
-
   typedef enum {
     MAIN,
     INBOX,
     OUTBOX,
     COMPOSING,
   } MessagesState_t;
+
+protected:
+  static const bool INCOMING = true;
+  static const bool SENT = false;
 
   MenuWidget* mainMenu = NULL;
   MenuWidget* inboxMenu = NULL;
@@ -1434,7 +1638,8 @@ protected:
 
 class ViewMessageApp : public WindowedApp {
 public:
-  ViewMessageApp(int32_t messageOffset, LCD& disp, ControlState& state, Storage& flash, HeaderWidget* header, FooterWidget* footer);
+  ViewMessageApp(int32_t messageOffset, LCD& disp, ControlState& state, Storage& flash, HeaderWidget* header, FooterWidget* footer
+                 , MessagesApp::MessagesState_t inboxOrOutbox);
   ~ViewMessageApp();
   ActionID_t getId() {
     return GUI_APP_VIEW_MESSAGE;
@@ -1457,6 +1662,47 @@ protected:
   bool messageSent = false;
 
   int32_t messageOffset;            // stores the message offset in the `preloaded` array
+};
+
+
+class PopupApp : public WindowedApp, FocusableApp {
+public:
+  PopupApp(LCD& disp, ControlState& state, char* caption, char* btn1, char* btn2,
+           char* PARAMETERmessage,
+           char* PARAMETERmessageLine2, char* PARAMETERmessageLine3, char* PARAMETERmessageLine4,
+           const unsigned char* PARAMETERicon, int PARAMETERiconsize);
+  virtual ~PopupApp();
+  ActionID_t getId() {
+    return GUI_APP_CALL;
+  };
+  appEventResult processEvent(EventType event);
+  void redrawScreen(bool redrawAll=false);
+
+  void swapHeaderFooter(HeaderWidget** globalHeader, FooterWidget** globalFooter) {
+    HeaderWidget* tmpH = header;
+    FooterWidget* tmpF = footer;
+
+    header = *globalHeader;
+    footer = *globalFooter;
+
+    *globalHeader = tmpH;
+    *globalFooter = tmpF;
+  }
+
+protected:
+
+  bool screenInited = false;
+  uint32_t reasonHash;
+
+  // WIDGETS
+  RectWidget* clearRect;
+  RectIconWidget* iconRect;
+
+  LabelWidget*  stateCaptionLine1;
+  LabelWidget*  stateCaptionLine2;
+  LabelWidget*  stateCaptionLine3;
+  LabelWidget*  stateCaptionLine4;
+  LabelWidget*  nameCaption;
 };
 
 class CreateMessageApp : public WindowedApp, FocusableApp {
@@ -1908,13 +2154,14 @@ protected:
   static const constexpr char* headphonesVolField = "headphones_vol";
   static const constexpr char* earpieceVolField = "speaker_vol";
   static const constexpr char* loudspeakerVolField = "loudspeaker_vol";
+  static const constexpr char* loudspeakerVoiceVolField = "loudspeaker_vol_voice";
 
   Audio* audio;
   CriticalFile ini;
 
   // Widgets
-  LabelWidget* labels[3];
-  IntegerSliderWidget* sliders[3];
+  LabelWidget* labels[4];
+  IntegerSliderWidget* sliders[4];
 
   bool screenInited = false;
 };
@@ -2034,7 +2281,7 @@ protected:
   static const constexpr char* headphonesVolField = "headphones_vol";
   static const constexpr char* earpieceVolField = "speaker_vol";
   static const constexpr char* loudspeakerVolField = "loudspeaker_vol";
-
+  int getPercentage(int value, bool loud);
   CriticalFile ini;
   bool caller;
   bool screenInited = false;
@@ -2211,6 +2458,30 @@ protected:
   PasswordInputWidget* passwordInput;
 };
 
+bool connectToSsid(char* ssid, CriticalFile& ini);
+void loadWiFiSettings(CriticalFile& ini);
+
+class WiFiSettingsApp : public WindowedApp, FocusableApp {
+public:
+  WiFiSettingsApp(LCD& disp, ControlState& state, HeaderWidget* header, FooterWidget* footer);
+  virtual ~WiFiSettingsApp();
+
+  ActionID_t getId() {
+    return GUI_APP_WIFISETTINGS;
+  }
+  appEventResult processEvent(EventType event);
+  void redrawScreen(bool redrawAll=false);
+
+protected:
+  CriticalFile ini;
+
+  // Widgets
+  RectWidget* clearRect;
+  LabelWidget* onOffLabel;
+  ChoiceWidget* wifiOnOff;
+  bool screenInited = false;
+};
+
 class EditNetworkApp : public WindowedApp, FocusableApp {
 public:
   EditNetworkApp(LCD& disp, ControlState& state, const char* SSID, HeaderWidget* header, FooterWidget* footer);
@@ -2228,20 +2499,22 @@ protected:
 
   // Widgets
   RectWidget* clearRect;
-  LabelWidget* ssidLabel;
+  LabelWidget* ssidLabel=nullptr;
   TextInputWidget* ssidInput;
   LabelWidget* passLabel;
   TextInputWidget* passInput;
-  ButtonWidget* saveButton;
+  //ButtonWidget* saveButton;
   ButtonWidget* forgetButton;
   ButtonWidget* connectionButton;   // Connect / Disconnect
-  ChoiceWidget* wifiOnOff;
 
   bool screenInited;
   bool standAloneApp;
+  bool forceRedrawFooter;
 
-  bool knownNetwork;        // if yes -> show "Forget", "Connect/Disconnect"
+  bool knownNetwork=false;        // if yes -> show "Forget", "Connect/Disconnect"
+  bool shouldRecheckKnownness = false;
   bool connectedNetwork;    // if yes -> show "Disconnect"
+  bool connectedToThisSSID = false;
 };
 
 class NetworksApp : public WindowedApp {
@@ -2339,12 +2612,43 @@ protected:
   bool screenInited;
 };
 
+class LoraConfigApp : public WindowedApp, FocusableApp {
+public:
+  LoraConfigApp(LCD& disp, ControlState& state, HeaderWidget* header, FooterWidget* footer);
+  virtual ~LoraConfigApp();
+
+  ActionID_t getId() {
+    return GUI_APP_LORA_CONFIG;
+  };
+  appEventResult processEvent(EventType event);
+  void redrawScreen(bool redrawAll=false);
+
+protected:
+
+  CriticalFile ini;
+
+  // Widgets
+  RectWidget* clearRect;
+  LabelWidget* onOffLabel;
+  LabelWidget* freqLabel;
+  // LabelWidget* resendUndeliveredsLabel;
+  ChoiceWidget* onOffSwitch;
+  ChoiceWidget* frequencySelection;
+  // ChoiceWidget* resendIfUndelivered;
+
+  bool screenInited;
+};
+
 // # # # # # # # # # # # # # # # # # # # # # # # # # # # #  MAIN CLASS  # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 class GUI {
 public:
   GUI();
   ~GUI();
+
+  void showPopup(char* caption, char *line1, char* line2, char* line3, char* line4, char* btn1, char* btn2,
+                 unsigned char* icon, int iconByteSize);
+
 
   void init(void (*lcdOnOffCallback)(bool));
   void setDumpRegion() {
@@ -2396,67 +2700,83 @@ protected:
     { 5,    icon_Settings_w, sizeof (icon_Settings_w), icon_Settings_b, sizeof (icon_Settings_b) },
   };
 
-  GUIMenuItem menu[38] PROGMEM = {  // increment size by one to add a new app
+  GUIMenuItem menu[48] PROGMEM = {  // increment size by one to add a new app
 
     // TODO: button names can be removed
 
-    { 0, -1, "Clock", "Menu", "", GUI_APP_CLOCK },
+    { 0, -1, _("Clock"), _("Menu"), "", GUI_APP_CLOCK },
 
-    { 1, 0, "WiPhone", "Select", "Back", GUI_ACTION_SUBMENU },
+    { 1, 0, "WiPhone", _("Select"), _("Back"), GUI_ACTION_SUBMENU },
 
     // Main menu items
     // TODO: call log (icons: Call_log_b/Call_log_w)
-    { 2, 1, "Phonebook", "", "", GUI_APP_PHONEBOOK },
-    { 20, 1, "Messages", "", "", GUI_APP_MESSAGES },
-    { 3, 1, "Tools", "Select", "Back", GUI_ACTION_SUBMENU },
-    { 4, 1, "Games", "Select", "Back", GUI_ACTION_SUBMENU },
-    { 5, 1, "Settings", "Select", "Back", GUI_ACTION_SUBMENU },
-    { 13, 1, "Reboot", "", "", GUI_ACTION_RESTART },
+    { 2, 1, _("Phonebook"), "", "", GUI_APP_PHONEBOOK },
+    { 20, 1, _("Messages"), "", "", GUI_APP_MESSAGES },
+    { 3, 1, _("Tools"), _("Select"), _("Back"), GUI_ACTION_SUBMENU },
+    { 4, 1, _("Games"), _("Select"), _("Back"), GUI_ACTION_SUBMENU },
+    { 5, 1, _("Settings"), _("Select"), _("Back"), GUI_ACTION_SUBMENU },
+    { 13, 1, _("Reboot"), "", "", GUI_ACTION_RESTART },
 
     // Tools (3)
-    { 31, 3, "Audio recorder", "", "", GUI_APP_RECORDER },
-    { 14, 3, "Scan WiFi networks", "", "", GUI_APP_NETWORKS },    // duplicate from below
-    { 7, 3, "Note page", "", "Back", GUI_APP_NOTEPAD },
-    { 21, 3, "UDP sender", "", "", GUI_APP_UDP },
-    { 28, 3, "Development", "Select", "Back", GUI_ACTION_SUBMENU },
+    { 31, 3, _("Audio recorder"), "", "", GUI_APP_RECORDER },
+    { 14, 3, _("Scan WiFi networks"), "", "", GUI_APP_NETWORKS },    // duplicate from below
+    { 7, 3, _("Note page"), "", _("Back"), GUI_APP_NOTEPAD },
+    { 21, 3, _("UDP sender"), "", "", GUI_APP_UDP },
+    { 28, 3, _("Development"), _("Select"), _("Back"), GUI_ACTION_SUBMENU },
 
     // Development (28)
-    { 36, 28, "My App", "", "", GUI_APP_MYAPP },
-    { 27, 28, "Diagnostics", "", "", GUI_APP_DIAGNOSTICS },
-    { 19, 28, "Mic test", "", "", GUI_APP_MIC_TEST },
+#ifdef SOFTWARE_EXAMPLES
+    { 39, 28, _("Software Examples"), _("Select"), _("Back"), GUI_ACTION_SUBMENU },
+#endif
+    { 36, 28, _("My App"), "", "", GUI_APP_MYAPP },
+    { 27, 28, _("Diagnostics"), "", "", GUI_APP_DIAGNOSTICS },
+    { 19, 28, _("Mic test"), "", "", GUI_APP_MIC_TEST },
 #ifdef MOTOR_DRIVER
-    { 22, 28, "Motor driver", "", "", GUI_APP_MOTOR },
+    { 22, 28, _("Motor driver"), "", "", GUI_APP_MOTOR },
 #endif // MOTOR_DRIVER
-    { 10, 28, "Widgets demo", "", "", GUI_APP_WIDGETS },           // TODO: remove?
-    { 16, 28, "Pictures demo", "", "", GUI_APP_PICS_DEMO },        // TODO: remove?
-    { 17, 28, "Fonts demo", "", "", GUI_APP_FONT_DEMO },           // TODO: remove?
-    { 18, 28, "Design demo", "", "", GUI_APP_DESIGN_DEMO },        // TODO: remove?
+    { 10, 28, _("Widgets demo"), "", "", GUI_APP_WIDGETS },           // TODO: remove?
+    { 16, 28, _("Pictures demo"), "", "", GUI_APP_PICS_DEMO },        // TODO: remove?
+    { 17, 28, _("Fonts demo"), "", "", GUI_APP_FONT_DEMO },           // TODO: remove?
+    { 18, 28, _("Design demo"), "", "", GUI_APP_DESIGN_DEMO },        // TODO: remove?
 #ifdef LED_BOARD
-    { 23, 28, "LED microphone", "", "", GUI_APP_LED_MIC },        // TODO: remove?
+    { 23, 28, _("LED microphone"), "", "", GUI_APP_LED_MIC },        // TODO: remove?
 #endif
 #ifdef USER_SERIAL
-    { 24, 28, "Parcel delivery", "", "", GUI_APP_PARCEL },
+    { 24, 28, _("Parcel delivery"), "", "", GUI_APP_PARCEL },
 #endif
-    { 26, 28, "UDP pin control", "", "", GUI_APP_PIN_CONTROL },
-    { 9, 28, "Circle app", "", "", GUI_APP_CIRCLES },
-    { 35, 28, "Digital Rain demo", "", "", GUI_APP_DIGITAL_RAIN },
-    { 38, 28, "UART Passthrough", "", "", GUI_APP_UART_PASS },
+    { 26, 28, _("UDP pin control"), "", "", GUI_APP_PIN_CONTROL },
+    { 9, 28, _("Circle app"), "", "", GUI_APP_CIRCLES },
+    { 35, 28, _("Digital Rain demo"), "", "", GUI_APP_DIGITAL_RAIN },
+#ifdef USER_SERIAL
+    { 38, 28, _("UART Passthrough"), "", "", GUI_APP_UART_PASS },
+#endif
     // Games (4)
 #ifdef BUILD_GAMES
-    { 34, 4, "Ackman", "", "", GUI_APP_ACKMAN },
-    { 6, 4, "FIDE Chess", "", "", GUI_APP_FIDE_CHESS },
+    { 34, 4, _("Ackman"), "", "", GUI_APP_ACKMAN },
+    { 6, 4, _("FIDE Chess"), "", "", GUI_APP_FIDE_CHESS },
     //{ 8, 4, "Chess960", "", "", GUI_APP_CHESS960 },
-    { 29, 4, "King of the Hill", "", "", GUI_APP_HILL_CHESS },
+    { 29, 4, _("King of the Hill"), "", "", GUI_APP_HILL_CHESS },
 #endif
 
+#ifdef SOFTWARE_EXAMPLES
+    { 40, 39, _("LED Example"), "", "", GUI_APP_LEDEXAMPLEAPP },
+    { 41, 39, _("Button Press Example"), "", "", GUI_APP_ButtonPressApp },
+    { 42, 39, _("Battery Info"), "", "", GUI_APP_BatteryApp },
+    { 43, 39, _("Peripheral Test"), "", "", GUI_APP_PeriTestApp },
+    //{ 43, 39, _("Screenshot App"), "", "", GUI_APP_ScreenshotApp }, //not requested to be merged
+    { 44, 39, _("Real Time App"), "", "", GUI_APP_RealTimeApp },
+    { 45, 39, _("LoRa App"), "", "", GUI_APP_LoRaApp },
+#endif
     // Settings (5)
-    { 11, 5, "SIP accounts", "", "", GUI_APP_SIP_ACCOUNTS },
-    { 12, 5, "Edit current network", "", "", GUI_APP_EDITWIFI },
-    { 15, 5, "Scan WiFi networks", "", "", GUI_APP_NETWORKS },
-    { 30, 5, "Audio settings", "", "", GUI_APP_AUDIO_CONFIG },
-    { 33, 5, "Screen config", "", "", GUI_APP_SCREEN_CONFIG },
-    { 32, 5, "Time offset", "", "", GUI_APP_TIME_CONFIG },
-    {37, 5, "Firmware settings", "", "", GUI_APP_OTA}
+    { 11, 5, _("SIP accounts"), "", "", GUI_APP_SIP_ACCOUNTS },
+    { 47, 5, _("WiFi Settings"), "", "", GUI_APP_WIFISETTINGS},
+    { 12, 5, _("Edit current network"), "", "", GUI_APP_EDITWIFI },
+    { 15, 5, _("Scan WiFi networks"), "", "", GUI_APP_NETWORKS },
+    { 30, 5, _("Audio settings"), "", "", GUI_APP_AUDIO_CONFIG },
+    { 33, 5, _("Screen config"), "", "", GUI_APP_SCREEN_CONFIG },
+    { 32, 5, _("Time offset"), "", "", GUI_APP_TIME_CONFIG },
+    { 37, 5, _("Firmware settings"), "", "", GUI_APP_OTA},
+    { 46, 5, _("Lora settings"), "", "", GUI_APP_LORA_CONFIG}
   };
 
   const char* alphNum[11] = {
@@ -2486,6 +2806,8 @@ protected:
   ClockApp* clockApp = NULL;
   WiPhoneApp* runningApp = NULL;
   Audio* audio = NULL;
+
+  PopupApp* popupApp = NULL;
 
   // Widgets
   GUIWidget** widgetsArray;       // widgets to be displayed in current application

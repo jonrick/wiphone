@@ -2207,12 +2207,13 @@ int16_t SmoothFont::fitWordsLength(const char* string, uint16_t width, int8_t di
 int32_t SmoothFont::textWidth(const char* string) {
   int32_t str_width = 0;
   const char* end = string + strlen(string);
-
+  //log_d("get unicode for %s >>!!!!!", string);
   while (string < end)
   {
     uint16_t n = 0;
     uint16_t unicode = TFT_eSPI::decodeUTF8((uint8_t*) string, &n, end-string);
         string += n;
+    //log_d("unicde for %s is %04x ", string, unicode);
     if (unicode)
     {
       if (unicode == 0x20) str_width += spaceWidth;
@@ -2226,7 +2227,11 @@ int32_t SmoothFont::textWidth(const char* string) {
           if (*string) str_width += gxAdvance[gNum];
           else str_width += (gdX[gNum] + gWidth[gNum]);
         }
-        else str_width += spaceWidth + 1;
+        else {
+          str_width += spaceWidth + 1;
+          //log_d("no unicode found for the %c ",string);
+        } 
+          
       }
     }
   }
@@ -5654,15 +5659,19 @@ void IconRle3::load() {
 #define DECODE_UTF8
 uint16_t TFT_eSPI::decodeUTF8(uint8_t *buf, uint16_t *index, uint16_t remaining)
 {
-  byte c = buf[(*index)++];
+  uint16_t c = buf[(*index)++];
 
 #ifdef DECODE_UTF8
   // 7 bit Unicode
-  if ((c & 0x80) == 0x00) return c;
+  if ((c & 0x80) == 0x00) {
+    return c;
+  } 
 
   // 11 bit Unicode
-  if (((c & 0xE0) == 0xC0) && (remaining > 1))
+  if (((c & 0xE0) == 0xC0) && (remaining > 1)) {
     return ((c & 0x1F)<<6) | (buf[(*index)++]&0x3F);
+  }
+    
 
   // 16 bit Unicode
   if (((c & 0xF0) == 0xE0) && (remaining > 2))

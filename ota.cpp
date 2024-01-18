@@ -1,5 +1,5 @@
 /*
-Copyright © 2019, 2020, 2021, 2022 HackEDA, Inc.
+Copyright © 2019, 2020, 2021, 2022, 2023 HackEDA, Inc.
 Licensed under the WiPhone Public License v.1.0 (the "License"); you
 may not use this file except in compliance with the License. You may
 obtain a copy of the License at
@@ -20,6 +20,8 @@ governing permissions and limitations under the License.
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
 #include "esp_ota_ops.h"
+#include "config.h"
+
 
 #define CA_CERT_MAX_SZ 10*1024
 

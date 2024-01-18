@@ -1,5 +1,5 @@
 /*
-Copyright © 2019, 2020, 2021, 2022 HackEDA, Inc.
+Copyright © 2019, 2020, 2021, 2022, 2023 HackEDA, Inc.
 Licensed under the WiPhone Public License v.1.0 (the "License"); you
 may not use this file except in compliance with the License. You may
 obtain a copy of the License at
@@ -11,6 +11,15 @@ on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
 either express or implied. See the License for the specific language
 governing permissions and limitations under the License.
 */
+//check version of SDK
+#if __has_include(<WiPhone.h>)
+#include <WiPhone.h>
+#if WIPHONE_SDK_VER < 1
+#error "The installed WiPhone board definition is outdated. To use the current firmware, you need to upgrade the WiPhone Board definition to v0.1.3 or higher. Go to "Tools" > "Board" > "Boards Manager" to upgrade, or refer to the Technical Manual for instructions."
+#endif
+#else
+#error "The installed WiPhone board definition is outdated and missing the WiPhone.h file. To use the current firmware, you need to upgrade the WiPhone Board definition to v0.1.3 or higher. Go to "Tools" > "Board" > "Boards Manager" to upgrade, or refer to the Technical Manual for instructions."
+#endif
 
 #include <dummy.h>
 
@@ -26,7 +35,8 @@ governing permissions and limitations under the License.
 #include <stdio.h>
 #include "GUI.h"
 #include "tinySIP.h"
-#include "config.h"
+#include "WiPhoneConfig.h"
+#include "WiPhone.h"
 #include "clock.h"
 #include "Audio.h"
 #include "lwip/api.h"
@@ -38,8 +48,13 @@ governing permissions and limitations under the License.
 #include "lora.h"
 #include "esp_ota_ops.h"
 #include "Test.h"
+#include <esp_wifi.h>
+#include "ErrorsPopupStrings.h"
+
+void powerOff();
 
 static bool been_in_verify = false;
+extern bool wifiOn;
 
 #ifndef WIPHONE_PRODUCTION
 #include "Test.h"
@@ -54,10 +69,10 @@ extern "C" bool verifyOta() {
 static Ota ota("");
 
 GUI gui;
-uint32_t chipId = 0;
+extern uint32_t chipId;
 
 #ifdef LORA_MESSAGING
-static Lora lora;
+/*static*/ Lora lora;
 #endif
 
 // # # # # # # # # # # # # # # # # # # # # # # # # # # # #  PERIPHERALS  # # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -156,7 +171,7 @@ void stopRingtone() {
   gui.state.ringing = false;
   gui.state.vibroOn = false;
   allDigitalWrite(VIBRO_MOTOR_CONTROL, LOW);
-  allDigitalWrite(KEYBOARD_LED, HIGH);
+  //allDigitalWrite(KEYBOARD_LED, HIGH);
 }
 
 // # # # # # # # # # # # # # # # # # # # # # # # # # # # #  HEADPHONE INTERRUPT  # # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -502,25 +517,8 @@ bool gpioExtenderServiceInterrupt() {
 }
 
 // # # # # # # # # # # # # # # # # # # # # # # # # # # # #  SETUP  # # # # # # # # # # # # # # # # # # # # # # # # # # # #
-
 void setup() {
-  // Initialize serial
-  const uart_config_t uart_config = {
-    .baud_rate = SERIAL_BAUD,
-    .data_bits = UART_DATA_8_BITS,
-    .parity = UART_PARITY_DISABLE,
-    .stop_bits = UART_STOP_BITS_1,
-    .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
-  };
-
-  int RX_BUF_SIZE =  1024;
-
-  uart_param_config(UART_NUM_0, &uart_config);
-  uart_driver_install(UART_NUM_0, RX_BUF_SIZE * 2, 0, 0, NULL, 0);
-
-  for(int i=0; i<17; i=i+8) {
-    chipId |= ((ESP.getEfuseMac() >> (40 - i)) & 0xff) << i;
-  }
+  WiPhoneSetup();
 
   log_i("\r\nChip id: %X %d %d", chipId, ESP.getFreeHeap(), heap_caps_get_free_size(MALLOC_CAP_32BIT));
   log_i("Firmware version: %s", FIRMWARE_VERSION);
@@ -548,12 +546,13 @@ void setup() {
     allPinMode(KEYBOARD_LED, OUTPUT);
     allPinMode(VIBRO_MOTOR_CONTROL, OUTPUT);
     allPinMode(POWER_CONTROL, OUTPUT);
+    allPinMode(ENABLE_DAUGHTER_3V3, OUTPUT);
     // Default state
     allDigitalWrite(POWER_CONTROL, LOW);
     allDigitalWrite(VIBRO_MOTOR_CONTROL, LOW);
     allDigitalWrite(KEYBOARD_LED, HIGH);
   } else {
-    log_e("extender failed");
+    log_d("extender failed");
     gui.state.extenderInited = false;
   }
 #else // not WIPHONE_INTEGRATED_1_4
@@ -627,7 +626,7 @@ void setup() {
   Random.feed(micros());      // TODO: maybe feed microphone data to Random.feed()
 
   // Mounter internal filesystem
-  if (SPIFFS.begin()) {
+  if (SPIFFS.begin(true)) {
     log_d("SPI filesystem mounted");
   } else {
     log_d("SPI filesystem mount FAILED");
@@ -756,8 +755,8 @@ void setup() {
 #if defined(MOTOR_DRIVER) && MOTOR_DRIVER == 8833
   motorDriver.attachMotorA(AIN1, AIN2);
   motorDriver.attachMotorB(BIN1, BIN2);
-  pinMode(MotorEN , OUTPUT);
-  digitalWrite(MotorEN , LOW);
+  pinMode(MotorEN, OUTPUT);
+  digitalWrite(MotorEN, LOW);
 #endif
 
   //esp_pm_config_esp32_t conf = { RTC_CPU_FREQ_240M, 240, RTC_CPU_FREQ_80M, 10, true };
@@ -785,6 +784,9 @@ void setup() {
   gui.loadSettings();
   gui.reloadMessages();
 
+  bool memtestresult = test_memory(1 /*100*/);
+  log_d("memtestresult: %d", memtestresult);
+
   log_v("Free memory after reload messages: %d %d", ESP.getFreeHeap(), heap_caps_get_free_size(MALLOC_CAP_32BIT));
 
   if (gui.state.dimming || gui.state.sleeping) {
@@ -811,48 +813,97 @@ void setup() {
   vTaskPrioritySet(NULL, mainThreadPrio);
 
   log_v("Free memory after vTaskPrioritySet: %d %d", ESP.getFreeHeap(), heap_caps_get_free_size(MALLOC_CAP_32BIT));
-
-
   wifiState.init();
+  /*Check the wifi-on-off selection to disable the WiFi connection.*/
+  CriticalFile iniNetworks(Networks::filename);
+  if(iniNetworks.load() && !iniNetworks.isEmpty()) {
+    if(iniNetworks.hasSection("wifi") && iniNetworks["wifi"].hasKey("wifionoff")) {
+      wifiOn = (strncmp(iniNetworks["wifi"]["wifionoff"], "on", 2) == 0);
+      if (strncmp(iniNetworks["wifi"]["wifionoff"], "on", 2) == 0) {
+        log_v("Free memory after wifi init: %d %d", ESP.getFreeHeap(), heap_caps_get_free_size(MALLOC_CAP_32BIT));
 
-  log_v("Free memory after wifi init: %d %d", ESP.getFreeHeap(), heap_caps_get_free_size(MALLOC_CAP_32BIT));
+        if (!wifiState.hasPreferredSsid() ) {
+          wifiState.disable();  // if we don't have a saved SSID to connect to, turn off WiFi to save power
+        } else {
 
-  if (!wifiState.hasPreferredSsid()) {
-    wifiState.disable();  // if we don't have a saved SSID to connect to, turn off WiFi to save power
-  }
+          int counter = 0;
 
-  int counter = 0;
-  wifiState.loadPreferred();
+          //lora.detachInterrupts(); we are in setup, so detach&attach no needed
+          wifiState.loadPreferred();
 
-  if (!wifiState.userDisabled()) {
-    wifiState.connectToPreferred();
-    while (!wifiState.isConnected() && ++counter < 10) {
-      log_v("Waiting for wifi: %d %d", counter, ESP.getFreeHeap());
-      wifiState.connectToPreferred();
-      delay(500);
+          wifiState.connectToPreferred();
+          //lora.attachInterrupts();
+
+          while (!wifiState.isConnected() && ++counter < 5) {
+            log_d("Waiting for wifi: %d %d", counter, ESP.getFreeHeap());
+            //lora.detachInterrupts();
+            wifiState.connectToPreferred();
+            //lora.attachInterrupts();
+            if(!wifiState.isConnected()) {
+              delay(500);
+            }
+          }
+
+          backupWiFiConnected = wifiState.isConnected();
+          backupConnectedSsid = wifiState.ssid() ? strdup(wifiState.ssid()) : nullptr;
+        }
+      } else if ((strncmp(iniNetworks["wifi"]["wifionoff"], "off", 3) == 0) && (wifiState.hasPreferredSsid())) {
+        //lora.detachInterrupts();
+        wifiState.loadPreferred();
+        wifiState.connectToPreferred();
+        //lora.attachInterrupts();
+        wifiState.disable();
+      }
+
+    } else {
+      wifiOn = true;  //TODO: what is the default state? Should be true for previous ini versions.
     }
+    if(!wifiOn) {
+      esp_err_t err = esp_wifi_stop();
+      if(err != ESP_OK) {
+        log_e("WIFI cann't be stopped");
+      } else {
+        log_d("WIFI will be stopped");
+        wifiState.disable();
+      }
+    }
+    iniNetworks.unload();
   }
 
-  if (!ota.hasJustUpdated() && ota.userRequestedUpdate()) {
-    gui.drawOtaUpdate();
-    ota.doUpdate();
-  } else if (!ota.hasJustUpdated() && ota.updateExists() && (ota.autoUpdateEnabled() || ota.userRequestedUpdate())) {
-    gui.drawOtaUpdate();
-    ota.doUpdate();
+  log_d("WiFi State is %d",wifiState.isConnected());
+  if (wifiState.isConnected()) {
+    if (!ota.hasJustUpdated() && ota.userRequestedUpdate()) {
+      gui.drawOtaUpdate();
+      ota.doUpdate();
+    } else if (!ota.hasJustUpdated() && ota.updateExists() && (ota.autoUpdateEnabled() || ota.userRequestedUpdate())) {
+      gui.drawOtaUpdate();
+      ota.doUpdate();
+    }
+    ota.setUserRequestedUpdate(false);
   }
 
-  ota.setUserRequestedUpdate(false);
 
   static Audio audio_local(true, I2S_BCK_PIN, I2S_WS_PIN, I2S_MOSI_PIN, I2S_MISO_PIN);
   audio = &audio_local;
   gui.state.codecInited = !audio->error();
 
+
+  // Setup for LoRa messaging
+#ifdef LORA_MESSAGING
+
+  // allDigitalWrite(ENABLE_DAUGHTER_3V3, LOW);
+  lora.setup();
+#endif
+
   // Load phone configs
   {
     CriticalFile ini(Storage::ConfigsFile);
+    ini.unload();
     if ((ini.load() || ini.restore()) && !ini.isEmpty()) {
-      if (ini[0].hasKey("v") && !strcmp(ini[0]["v"], "1")) {    // check version of the file format
+      log_d("WiPhone init audio, time zn and screen from ini file");
 
+      if (ini[0].hasKey("v") && strcmp(ini[0]["v"], "1") == 0) {    // check version of the file format
+        log_d("WiPhone init file check format is done");
         // Load audio volume
         if (ini.hasSection("audio")) {
           int8_t speakerVol, headphonesVol, loudspeakerVol;
@@ -871,6 +922,36 @@ void setup() {
           ntpClock.setTimeZone(tz);
         }
 
+        // Load Lora settings
+
+        if (!ini.hasSection("lora")) {
+          // log_d("adding section `lora`");
+          // ini.addSection("lora");
+          // ini["lora"]["onOff"] = "On";
+          // ini["lora"]["freq"] = "915Mhz";
+          // ini["lora"]["resendUndelivereds"] = "No";
+          // ini.store();
+          lora.setOnOff(true);
+          lora.setFrequency((float)915.0 );// can be defined in a header
+
+          // log_d("WiPhone ini file corrupt or may be this the first boot");
+          // log_d("ini file load %d  restore %d   isempty %d>>>>>>", ini.load(), ini.restore(), ini.isEmpty());
+          // log_d("adding section `lora`");
+          // ini.addSection("lora");
+          // ini["lora"]["onOff"] = "On";
+          // ini["lora"]["freq"] = "915Mhz";
+          // lora.setSendUndelivereds(false);
+
+
+        } else {
+          log_d("Lora Section exist");
+          lora.setOnOff((strcmp(ini["lora"]["onOff"], "On") == 0) ? true : false);
+          lora.setFrequency((strcmp(ini["lora"]["freq"], "915Mhz") == 0) ? (float)915.0 : (float)868.0);// can be defined in a header
+          // lora.setSendUndelivereds((strcmp(ini["lora"]["resendUndelivereds"], "No") == 0) ? false : true);
+
+        }
+
+
         // Load screen dimming & sleeping config
         if (ini.hasSection("screen")) {
           gui.state.brightLevel = ini["screen"].getIntValueSafe("bright_level", 100);
@@ -880,8 +961,10 @@ void setup() {
           gui.state.sleeping = ini["screen"].getIntValueSafe("sleeping", 0) > 0;
           gui.state.sleepAfterMs = ini["screen"].getIntValueSafe("sleep_after_s", 30)*1000;
           gui.state.screenBrightness = gui.state.brightLevel-1; // Forces the new brightness setting to be applied
+
           gui.processEvent(0, 0); // Need to call gui event loop so brightness settings are applied
         } else {
+          log_d("WiPhone no scrren settings in ini file" );
           gui.state.brightLevel = 100;
           gui.state.dimming = true;
           gui.state.dimLevel = 15;
@@ -893,9 +976,26 @@ void setup() {
         // Load keypad locking config
         gui.state.locking = ini.hasSection("lock") ? ini["lock"].getIntValueSafe("lock_keyboard", 0) : 1;
       }
+    } else {  // any ini data that need to be exist when first boot should be put here
+      // lora.setOnOff(true);
+      // lora.setFrequency((float)915.0);// can be defined in a header
+      // log_d("WiPhone ini file corrupt or may be this the first boot");
+      // log_d("ini file load %d  restore %d   isempty %d>>>>>>", ini.load(), ini.restore(), ini.isEmpty());
+      // if (!ini.hasSection("lora")) {
+      //   log_d("adding section `lora`");
+      //   ini.addSection("lora");
+      //   ini["lora"]["onOff"] = "On";
+      //   ini["lora"]["freq"] = "915Mhz";
+      //ini["lora"]["resendUndelivereds"] = "No";
+      // ini.store();
+
+      // lora.setSendUndelivereds((strcmp(ini["lora"]["resendUndelivereds"], "No") == 0) ? false : true);
+      // }
     }
     gui.setAudio(audio);
   }
+
+
 
 #ifdef HEADPHONE_DETECT_PIN
   pinMode(HEADPHONE_DETECT_PIN, INPUT_PULLUP);
@@ -908,10 +1008,6 @@ void setup() {
 
   ntpClock.startUpdates();
 
-  // Setup for LoRa messaging
-#ifdef LORA_MESSAGING
-  lora.setup();
-#endif
 
   log_d("WiPhone, firmware date = " __DATE__);
 
@@ -968,9 +1064,15 @@ bool lastTurnOff = true;
 
 uint32_t last_lora_send = 0;
 
+uint32_t timeoutForInvitingCallee = 0;
+
+char returnedDataFromCheckCallMethod[300];
+bool test_memory(uint32_t num_tests);
+
 void loop() {
   while (1) {
     uint32_t now = millis();
+
     // DEBUG
     //uint32_t loopTime = micros();
     //if (!msProfileStart) msProfileStart = loopTime;
@@ -983,7 +1085,9 @@ void loop() {
         if (powerButtonPressed) {
           msPowerOffStarted = now;
         } else if (poweringOff) {
+          lora.detachInterrupts();
           redrawWhat |= gui.processEvent(now, POWER_NOT_OFF_EVENT);
+          lora.attachInterrupts();
           poweringOff = false;
         }
       }
@@ -1044,7 +1148,11 @@ void loop() {
       }
 
       if (keyPressed == WIPHONE_KEY_END) {
-        gui.state.setSipState(CallState::HangUp);
+        if (gui.state.sipState == CallState::Call || gui.state.sipState == CallState::InvitedCallee
+            || gui.state.sipState == CallState::InvitingCallee || gui.state.sipState == CallState::BeingInvited) {
+          gui.state.setSipState(CallState::HangUp);
+        }
+
       }
 
 
@@ -1053,7 +1161,7 @@ void loop() {
 #else
       if (keyPressed == WIPHONE_KEY_F1) {
         gui.toggleScreen();
-        //allDigitalWrite(ENABLE_DAUGHTER_33V, HIGH);
+        //allDigitalWrite(ENABLE_DAUGHTER_3V3, HIGH);
         //gui.longBatteryAnimation();
         allDigitalWrite(VIBRO_MOTOR_CONTROL, HIGH);
         allDigitalWrite(KEYBOARD_LED, LOW);
@@ -1096,7 +1204,9 @@ void loop() {
 #endif
 
       // Process event in GUI
+      lora.detachInterrupts();
       redrawWhat |= gui.processEvent(now, keyPressed);
+      lora.attachInterrupts();
       //log_d("redrawWhat = 0x%x", redrawWhat);
 
       // Check for "Easter eggs"
@@ -1173,12 +1283,18 @@ void loop() {
     }
 
     // Turn on/off the keypad LEDs for 5s
-    if (anyPressed) {
-      msLastKeyPress = now;       // this is also used to idle keyboard event (when a symbol gets chosen via waiting)
-      if (!keypadLedsOn) {
-        // Turn on LEDs
-        allDigitalWrite(KEYBOARD_LED, LOW);
-        keypadLedsOn = true;
+    if(!gui.state.disableAutoTurnOnKeypadLights) {
+      if (anyPressed) {
+        msLastKeyPress = now;       // this is also used to idle keyboard event (when a symbol gets chosen via waiting)
+        if (/*!keypadLedsOn*/true) {
+          // Turn on LEDs
+          allDigitalWrite(KEYBOARD_LED, LOW);
+          keypadLedsOn = true;
+        }
+      } else if (keypadLedsOn && elapsedMillis(now, msLastKeyPress, KEYPAD_LEDS_ON_MS)) {
+        // Turn off LEDs
+        allDigitalWrite(KEYBOARD_LED, HIGH);
+        keypadLedsOn = false;
       }
     } else if (keypadLedsOn && elapsedMillis(now, msLastKeyPress, KEYPAD_LEDS_ON_MS)) {
       // Turn off LEDs
@@ -1188,8 +1304,14 @@ void loop() {
 
     // Connect to WiFi
     if (wifiState.doReconnect() && !wifiState.isConnected() && elapsedMillis(now, msLastWifiRetry, WIFI_RETRY_PERIOD_MS) && !wifiState.userDisabled()) {
-      if (wifiState.connectToPreferred()) {
+      lora.detachInterrupts();
+      bool returnValue = wifiState.connectToPreferred();
+      lora.attachInterrupts();
+      if (returnValue) {
         log_d("Connecting to WiFi");
+        delay(100);
+        backupWiFiConnected = wifiState.isConnected();
+        backupConnectedSsid = wifiState.ssid() ? strdup(wifiState.ssid()) : nullptr;
       } else {
         log_d("Not connecting to WiFi");
       }
@@ -1209,7 +1331,9 @@ void loop() {
     // Trigger periodic event: APP_TIMER_EVENT
     if (gui.state.msAppTimerEventPeriod > 0) {
       if (elapsedMillis(now, gui.state.msAppTimerEventLast, gui.state.msAppTimerEventPeriod)) {
+        lora.detachInterrupts();
         redrawWhat |= gui.processEvent(now, APP_TIMER_EVENT);
+        lora.attachInterrupts();
         gui.state.msAppTimerEventLast = now;
       }
     }
@@ -1217,7 +1341,9 @@ void loop() {
     // Trigger scheduled events
     EventType evnt;
     while (evnt = gui.state.popEvent(now)) {
+      lora.detachInterrupts();
       redrawWhat |= gui.processEvent(now, evnt);
+      lora.attachInterrupts();
     }
 
     // Update message times
@@ -1244,12 +1370,16 @@ void loop() {
         waitingForClockUpdate = false;
       }
       msLastMinute = now;
+      lora.detachInterrupts();
       redrawWhat |= gui.processEvent(now, TIME_UPDATE_EVENT);
+      lora.attachInterrupts();
     } else if (elapsedMillis(now, msLastMinute, TIME_UPDATE_MINUTE_MS) || (ntpClock.getSecond() > 0 && elapsedMillis(now, msLastMinute, TIME_UPDATE_MINUTE_MS - ntpClock.getSecond() * 1000))) {
       // Tick at the beginning of next minute (or tick if not ticked for more than a minute)
       ntpClock.minuteTick(now);
       msLastMinute = now;
+      lora.detachInterrupts();
       redrawWhat |= gui.processEvent(now, TIME_UPDATE_EVENT);
+      lora.attachInterrupts();
     }
 
 //    // Turn OFF?
@@ -1294,12 +1424,16 @@ void loop() {
 #if defined(POWER_CHECK) && POWER_CHECK >= 0
       log_d("Power button = %d", gpioExtender.digitalRead(POWER_CHECK) == LOW ? 1 : 0);
 #endif
+      lora.detachInterrupts();
       redrawWhat |= gui.processEvent(now, BATTERY_UPDATE_EVENT);
+      lora.attachInterrupts();
 
       // Power off at low battery to avoid unexpected behaviours
       if (v <= 3.3 && now >= 30000) {     // allow phone to work on low battery for 30 seconds
         powerOff();
+        lora.detachInterrupts();
         redrawWhat |= gui.processEvent(now, POWER_OFF_EVENT);
+        lora.attachInterrupts();
       }
     }
 
@@ -1309,7 +1443,9 @@ void loop() {
       int rssi = WiFi.RSSI();
       if (GUI::wifiSignalStrength(gui.state.wifiRssi) != GUI::wifiSignalStrength(rssi)) {
         gui.state.wifiRssi = rssi;
+        lora.detachInterrupts();
         redrawWhat |= gui.processEvent(now, WIFI_ICON_UPDATE_EVENT);
+        lora.attachInterrupts();
       } else {
         gui.state.wifiRssi = rssi;
       }
@@ -1328,12 +1464,16 @@ void loop() {
         // If USB is connected -> enable blinking
         // otherwise -> disable blinking
         gui.state.battBlinkOn = usbHere;
+        lora.detachInterrupts();
         redrawWhat |= gui.processEvent(now, USB_UPDATE_EVENT);
+        lora.attachInterrupts();
       } else if (usbHere && !gui.state.battCharged && gui.state.battSoc < 100) {
 #ifndef BATTERY_BLINKING_OFF
         // If blinking enabled -> trigger BATTERY_BLINK_EVENT every second
         gui.state.battBlinkOn = !gui.state.battBlinkOn;
+        lora.detachInterrupts();
         redrawWhat |= gui.processEvent(now, BATTERY_BLINK_EVENT);
+        lora.attachInterrupts();
         log_v("blinked");
 #endif
       }
@@ -1346,14 +1486,18 @@ void loop() {
 #ifdef WIPHONE_INTEGRATED_1_4
     if (powerButtonPressed && !poweringOff && elapsedMillis(now, msPowerOffStarted, 2500)) {
       powerOff();
+      lora.detachInterrupts(); // FIXME: this may be deleted because the device is already powering off.
       redrawWhat |= gui.processEvent(now, POWER_OFF_EVENT);
+      lora.attachInterrupts();
     }
 #endif // WIPHONE_INTEGRATED_1_4
 #endif // WIPHONE_BOARD
 
     if (gui.state.inputCurKey && msLastKeyInput && elapsedMillis(now, msLastKeyInput, KEYPAD_IDLE_MS)) {
       log_i("keypad idle");
+      lora.detachInterrupts();
       redrawWhat |= gui.processEvent(now, KEYBOARD_TIMEOUT_EVENT);
+      lora.attachInterrupts();
       msLastKeyInput = 0;
     }
 
@@ -1368,7 +1512,9 @@ void loop() {
     if (gui.state.userSerialBuffer.size() > 0 && userSerialLastSize != gui.state.userSerialBuffer.size()) {
       // Trigger UART event
       log_d("User serial: %s", gui.state.userSerialBuffer.getCopy());
+      lora.detachInterrupts();
       redrawWhat |= gui.processEvent(now, USER_SERIAL_EVENT);
+      lora.attachInterrupts();
       userSerialLastSize = gui.state.userSerialBuffer.size();
     }
 #endif // USER_SERIAL
@@ -1393,9 +1539,11 @@ void loop() {
 
         sip.wifiTerminateCall();  // wifi is disconnected but need to destroy this dialogue
         gui.exitCall();
-        
+
         gui.state.setSipState(CallState::HungUp);
+        lora.detachInterrupts();
         appEventResult res = gui.processEvent(now, CALL_UPDATE_EVENT);
+        lora.attachInterrupts();
         gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
 
         wifiTerminateSip = TERMINATE_OK;
@@ -1429,7 +1577,9 @@ void loop() {
           gui.exitCall();
 
           gui.state.setSipState(CallState::HungUp);
+          lora.detachInterrupts();
           appEventResult res = gui.processEvent(now, CALL_UPDATE_EVENT);
+          lora.attachInterrupts();
           gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
 
           wifiTerminateSip = TERMINATE_OK;
@@ -1453,7 +1603,9 @@ void loop() {
                       gui.state.fromUriDyn,
                       gui.state.proxyPassDyn,
                       mac )) {
-          sip.triedToMakeCallCounter = 0;
+          if(sip.sendingMessage == false) {
+            sip.timeOfTheCallStarted = 0;
+          }
           log_d("Connected to SIP");
           gui.state.setSipState(CallState::Idle);
           log_d("caller free (0) = %s", sip.isBusy() ? "NO" : "YES");
@@ -1467,11 +1619,17 @@ void loop() {
         gui.state.sipAccountChanged = false;
 
       } else if (gui.state.sipState == CallState::Idle) {
-        sip.triedToMakeCallCounter = 0;
+        //sip.timeOfTheCallStarted = 0;
+
+        //reset the variables for detecting lack of RTPs.
+        rtpSilentCnt = 0;
+        rtpSilentScan = millis();
+        rtpSilentPeriod = RTP_SILENT_OFF;
+
         bool anySip = false;      // anything received?
         TinySIP::StateFlags_t res;
         do {
-          res = sip.checkCall(now);     // TODO: all of this logic could be reorganized to call checkCall in one place and then process results according to the current state
+          res = sip.checkCall(now, returnedDataFromCheckCallMethod);     // TODO: all of this logic could be reorganized to call checkCall in one place and then process results according to the current state
           if (res != TinySIP::EVENT_NONE && res != TinySIP::EVENT_RESPONSE_PARSED && res != TinySIP::EVENT_REQUEST_PARSED) {
             anySip = true;
           }
@@ -1479,10 +1637,29 @@ void loop() {
             gui.state.setRemoteNameUri(sip.getRemoteName(), sip.getRemoteUri());
             gui.becomeCallee();
             gui.state.setSipState(CallState::BeingInvited);
+            timeoutForInvitingCallee = now;
+            log_d("INVITING begin TIMEOUT IS %d", timeoutForInvitingCallee);
+            audio->chooseSpeaker(true);
             startRingtone();
           } else if (res != TinySIP::EVENT_NONE && res != TinySIP::EVENT_RESPONSE_PARSED && res != TinySIP::EVENT_REQUEST_PARSED) {
             log_d("UNPROCESSED CALL STATE (Idle): 0x%x", res);
             gui.state.setSipState(CallState::Idle);
+          }
+          if(res & TinySIP::EVENT_MESSAGE_ERROR) {
+            gui.showPopup(MSG_ERROR_POPUP_HEADER,
+                          MSG_ERR_POPUP_3_1ST_LINE,
+                          MSG_ERR_POPUP_3_2ND_LINE,
+                          MSG_ERR_POPUP_3_3RD_LINE,
+                          MSG_ERR_POPUP_3_4RD_LINE, "", "OK", (unsigned char*)icon_message_w, sizeof(icon_message_w));
+            /*FIXME: TODO: the last message should be deleted from the message list (internal flash memory or nano ini)*/
+          }
+          if(res & TinySIP::EVENT_MESSAGE_SENT) {
+            if(returnedDataFromCheckCallMethod && returnedDataFromCheckCallMethod[0] == '<') {
+              //remove < character which comes from sip tagging.
+              strncpy(returnedDataFromCheckCallMethod, returnedDataFromCheckCallMethod+1, strlen(returnedDataFromCheckCallMethod)-1);
+              returnedDataFromCheckCallMethod[strlen(returnedDataFromCheckCallMethod)-1] = '\0';//a null terminated string
+            }
+            gui.flash.messages.setSent(returnedDataFromCheckCallMethod, nullptr/*FIXME: the text field can be filled later*/);
           }
         } while (res & TinySIP::EVENT_MORE_BUFFER);
         bool isRegistered = sip.registrationValid(now);
@@ -1490,14 +1667,18 @@ void loop() {
           log_d("setting reason @ CallState::Idle");
           gui.state.setSipReason(sip.getReason());
           // Force GUI to update screen
+          lora.detachInterrupts();
           appEventResult res = gui.processEvent(now, CALL_UPDATE_EVENT);
+          lora.attachInterrupts();
           // Force GUI to update screen if registration status has changed
           // NOTE: SIP registration can happen only in Idle state
           if (isRegistered != gui.state.sipRegistered) {
             // Ingicate successful registration
             gui.state.sipRegistered = isRegistered;
             // Allow GUI display it
+            lora.detachInterrupts();
             res |= gui.processEvent(now, REGISTRATION_UPDATE_EVENT);       // the app should decide whether to react to registration update
+            lora.attachInterrupts();
             log_d("SIP EVENT_REGISTERED = %d", gui.state.sipRegistered);
           }
           gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
@@ -1509,9 +1690,12 @@ void loop() {
           if (msg) {
             auto err = sip.sendMessage(msg->getOtherUri(), msg->getMessageText());
             if (err == TINY_SIP_OK) {
-              gui.flash.messages.setSent(*msg);
+              //setSent is called when a response from the sip server arrives
+              //gui.flash.messages.setSent(*msg);
               delete msg;
               gui.state.outgoingMessages.remove(0);
+
+              gui.reloadMessages();
             } else {
               log_e("message sending FAILED");
             }
@@ -1530,6 +1714,7 @@ void loop() {
           }
           if (res & TinySIP::EVENT_CALL_TERMINATED) {
             if (gui.state.sipState != CallState::HungUp) {
+              audio->chooseSpeaker(false);
               stopRingtone();
               log_d("call terminated @ BeingInvited");
               gui.state.setSipState(CallState::HungUp);
@@ -1538,19 +1723,27 @@ void loop() {
           } else if (res != TinySIP::EVENT_NONE && res != TinySIP::EVENT_RESPONSE_PARSED && res != TinySIP::EVENT_REQUEST_PARSED) {
             log_d("UNPROCESSED CALL STATE (BeingInvited): 0x%x", res);
           }
+
+          if((now - timeoutForInvitingCallee) > INVITING_CALLEE_TIMEOUT) {
+            gui.state.setSipState(CallState::HangUp);
+            log_d("call timed out @ InvitedCallee = %d %d", now, (now - timeoutForInvitingCallee));
+          }
+
         } while (res & TinySIP::EVENT_MORE_BUFFER);
         if (anySip) {
           log_d("setting reason @ CallState::BeingInvited");
           gui.state.setSipReason(sip.getReason());
           // Force GUI to update screen
+          lora.detachInterrupts();
           appEventResult res = gui.processEvent(now, CALL_UPDATE_EVENT);
+          lora.attachInterrupts();
           gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
         }
 
       } else if (gui.state.sipState == CallState::Accept) {
 
         log_v("Accepting call");
-
+        audio->chooseSpeaker(false);
         stopRingtone();
         int res = sip.acceptCall();
         if (res == TINY_SIP_OK) {
@@ -1559,14 +1752,16 @@ void loop() {
           log_e("could not accept call, err = %d", res);
           gui.state.setSipState(CallState::HungUp);
           // Force GUI to update screen
+          lora.detachInterrupts();
           appEventResult res = gui.processEvent(now, CALL_UPDATE_EVENT);
+          lora.attachInterrupts();
           gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
         }
 
       } else if (gui.state.sipState == CallState::Decline) {
 
         log_d("Declining call");
-
+        audio->chooseSpeaker(false);
         stopRingtone();
 
         int res = sip.declineCall();
@@ -1574,9 +1769,12 @@ void loop() {
           gui.state.setSipState(CallState::HangingUp);
         } else {
           log_d("could not decline = %d", res);
-          gui.state.setSipState(CallState::HungUp);
+          gui.state.setSipState(CallState::Busy);
+          msHungUp = now;
           // Force GUI to update screen
+          lora.detachInterrupts();
           appEventResult res = gui.processEvent(now, CALL_UPDATE_EVENT);
+          lora.attachInterrupts();
           gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
         }
 
@@ -1594,6 +1792,8 @@ void loop() {
           log_e("sip callee unavailable");
           gui.state.setSipState(CallState::Idle);
         }
+
+        timeoutForInvitingCallee = now;
 
       } else if (gui.state.sipState == CallState::InvitedCallee) {
         // Audio session configs
@@ -1654,7 +1854,9 @@ void loop() {
         if (anySip) {
           log_d("setting reason @ CallState::InvitedCallee");
           gui.state.setSipReason(sip.getReason());
+          lora.detachInterrupts();
           appEventResult res = gui.processEvent(now, CALL_UPDATE_EVENT);
+          lora.attachInterrupts();
           gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
         }
 
@@ -1668,14 +1870,22 @@ void loop() {
             //audio->setVolume(-70, 6);                                   // max. volume for headphones, min. volume for speaker
             //audio->setVolumes(restoreSpeakerVol, restoreHeadphonesVol, Audio::MuteVolume);    // mute loudspeaker for calls
             audio->sendRtpStreamFromMic(audioFormat, rtpRemoteIP, rtpRemotePort);
+            delay(1000);
             audio->playRtpStream(audioFormat, rtpRemotePort);
           } else {
             log_e("audio session failure");
             gui.state.setSipReason("audio failed");
             // Force GUI to update screen
+            lora.detachInterrupts();
             appEventResult res = gui.processEvent(now, CALL_UPDATE_EVENT);
+            lora.attachInterrupts();
             gui.redrawScreen(false, false, true);
           }
+        }
+        // still inviting callee ?
+        else if(now - timeoutForInvitingCallee > INVITING_CALLEE_TIMEOUT) {
+          gui.state.setSipState(CallState::HungUp);
+          log_d("call timed out @ InvitedCallee = %d %d", now, (now - timeoutForInvitingCallee));
         }
 
       } else if (gui.state.sipState == CallState::Call) {
@@ -1709,7 +1919,9 @@ void loop() {
           log_d("setting reason @ CallState::Call");
           gui.state.setSipReason(sip.getReason());
           // Force GUI to update screen
+          lora.detachInterrupts();
           appEventResult res = gui.processEvent(now, CALL_UPDATE_EVENT);
+          lora.attachInterrupts();
           gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
         }
 
@@ -1745,7 +1957,9 @@ void loop() {
           }
 
           // Force GUI to update screen
+          lora.detachInterrupts();
           appEventResult res = gui.processEvent(now, CALL_UPDATE_EVENT);
+          lora.attachInterrupts();
           gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
         }
 
@@ -1753,6 +1967,7 @@ void loop() {
 
         // User request to hangup call -> send BYE / CANCEL request
         log_d("Terminating call");
+        audio->chooseSpeaker(false);
         stopRingtone();
         // Stop media session
         audio->showAudioStats();
@@ -1769,7 +1984,9 @@ void loop() {
           log_d("terminating error = %d", res);
           gui.state.setSipState(CallState::HungUp);
           // Force GUI to update screen
+          lora.detachInterrupts();
           appEventResult res = gui.processEvent(now, CALL_UPDATE_EVENT);
+          lora.attachInterrupts();
           gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
         }
 
@@ -1785,7 +2002,7 @@ void loop() {
           gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN, true);       // TODO: one of two special cases of redrawAll
         }*/
 
-      } else if (gui.state.sipState == CallState::HungUp) {
+      } else if (gui.state.sipState == CallState::HungUp || gui.state.sipState == CallState::Busy) {
 
         // Go back to normal
 
@@ -1794,7 +2011,9 @@ void loop() {
           log_d("hungup timeout: now = %d, msHungUp = %d", now, msHungUp);
           gui.state.setSipState(CallState::Idle);
           log_d("caller free (2) = %s", sip.isBusy() ? "NO" : "YES");
+          lora.detachInterrupts();
           appEventResult res = gui.processEvent(now, CALL_UPDATE_EVENT);
+          lora.attachInterrupts();
           gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN, true);       // TODO: one of two special cases of redrawAll
         }
 
@@ -1808,7 +2027,9 @@ void loop() {
         gui.flash.messages.saveMessage(msg->message, msg->from, msg->to, true, msg->useTime ? msg->utcTime : 0);    // time == 0 for unknown real time
         delete msg;
         // Pass event to GUI
+        lora.detachInterrupts();
         appEventResult res = gui.processEvent(now, NEW_MESSAGE_EVENT);
+        lora.attachInterrupts();
         gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
       }
     } else {
@@ -1816,22 +2037,105 @@ void loop() {
     }
 
 #ifdef LORA_MESSAGING
-    if (lora.loop()) {
+    int loraRetVal = lora.loop();
+    if (LORA_SND == loraRetVal) {  // receive new message
       log_d("Received LoRa message");
+      lora.detachInterrupts();
       appEventResult res = gui.processEvent(now, NEW_MESSAGE_EVENT);
+      lora.attachInterrupts();
       gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
-    }
+    } //   else if(2 == loraRetVal) {
+    //   log_d("Received LoRa ACK msg.");
+    //   lora.detachInterrupts();
+    //   appEventResult res = gui.processEvent(now, MESSAGES_ACK_RECVD_EVENT);
+    //   lora.attachInterrupts();
+    //   gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
+    // }
 
-    if (gui.state.outgoingLoraMessages.size() > 0) {
-      log_d("Sending LoRa message");
+    if (0 == loraRetVal && gui.state.outgoingLoraMessages.size() > 0 && lora.isOn()) {
+      //log_d("Sending LoRa message");
       // Send queued messages
       MessageData* msg = gui.state.outgoingLoraMessages[0];
-      if (msg) {
-        lora.send_message(msg->getOtherUri(), msg->getMessageText());
-        gui.flash.messages.setSent(*msg);
-        delete msg;
-        gui.state.outgoingLoraMessages.remove(0);
+      // log_d("Message Lenght is %d >>>>>>>>", strlen(msg->getMessageText()));
+      if (strlen(msg->getMessageText()) > LORA_MAX_MESSAGE_LEN) {
+        lora.msgBlks = strlen(msg->getMessageText())/LORA_MAX_MESSAGE_LEN;
+        if ((strlen(msg->getMessageText())%LORA_MAX_MESSAGE_LEN) != 0) {
+          lora.msgBlks++;
+        }
+      } else if (strlen(msg->getMessageText()) < LORA_MAX_MESSAGE_LEN) {
+        lora.msgBlks = 1;
       }
+
+      if (msg) {
+
+        if (lora.getTxCnt() > 6) {
+          lora.setTxCnt(0);
+        }
+        // } else if (lora.getTxCnt() == 0) {
+        //   msg->setTimeToResend(0);
+        // }
+        // log_d("this is the trial of tx number %d >>>", lora.getTxCnt());
+        appEventResult res ;
+        if (((millis() - msg->getTimeToResend()) > (lora.getTxCnt()*1000)) && lora.getTxCnt() < 5) {
+          log_d("this is the trial of tx number %d >>>", lora.getTxCnt());
+          if (lora.getTxCnt() == 0) {
+
+            lora.detachInterrupts();
+            res = gui.processEvent(now, MESSAGE_SENT_EVENT);
+            //gui.flash.messages.setSent(msg->getOtherUri(), (char*)msg->getMessageText());
+            lora.serRxedSeq(0);
+            lora.attachInterrupts();
+
+
+          }
+          // log_d("reset lora <<<<<<<>>>>>>>>");
+          // lora.setOnOff(true);
+          uint8_t ress = lora.send_message(msg->getOtherUri(), msg->getMessageText());
+          lora.setTxRes(ress);
+          lora.setTxCnt(lora.getTxCnt() + 1);
+          log_d("res of send is %d <><><><><><><><><><><", lora.getTxRes());
+          log_d("this is the trial of tx number %d >>>", lora.getTxCnt());
+          log_d("lora.getRxedSeq() %d == lora.getMsgBlks()%d",lora.getRxedSeq(), lora.getMsgBlks());
+          msg->setTimeToResend(millis());
+        } //  else {
+        //   uint8_t ress = lora.send_message(msg->getOtherUri(), msg->getMessageText());
+        //   lora.setTxRes(ress);
+        // }
+
+        if ( ((lora.getTxRes()) == true && (lora.getRxedSeq() == lora.getMsgBlks())) || ((lora.getTxRes() == true) && lora.old_lora_ack_flag == 0xa)) {
+          log_d("MSG SENT AND ACK RXED >>>>>>>>>>>>>>");
+          lora.detachInterrupts();
+          res = gui.processEvent(now, MESSAGES_ACK_RECVD_EVENT);
+          gui.flash.messages.setSent(msg->getOtherUri(), (char*)msg->getMessageText());
+          // res = gui.processEvent(now, MESSAGE_SENT_EVENT);
+          lora.attachInterrupts();
+          gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
+          gui.state.outgoingLoraMessages.remove(0);
+          lora.setParseSeq(0);
+          lora.setParseID(0);
+          lora.setParseFlag(0);
+          lora.setParsePaylSize(0);
+          lora.serRxedSeq(0);
+          lora.setTxCnt(0);
+          lora.old_lora_ack_flag = 0;
+          delete msg;
+        } else if ( (lora.getTxRes() == true) && (lora.getRxedSeq() != lora.getMsgBlks()) && (lora.getTxCnt() == 6)) {
+          log_d("MSG SENT AND ACK NOT RXED >>>>>>>>>>>>>>");
+          gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
+          gui.state.outgoingLoraMessages.remove(0);
+          lora.setTxCnt(0);
+          delete msg;
+        } else if ((lora.getRxedSeq() != lora.getMsgBlks()) && (lora.getTxCnt() == 5)) {
+          log_d("error in send or rec ack");
+          gui.state.outgoingLoraMessages.remove(0);
+          lora.setTxCnt(0);
+          delete msg;
+        }
+
+        //gui.redrawScreen(res & REDRAW_HEADER, res & REDRAW_FOOTER, res & REDRAW_SCREEN);
+
+      }
+
     }
 #endif
 

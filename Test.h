@@ -1,5 +1,5 @@
 /*
-Copyright © 2019, 2020, 2021, 2022 HackEDA, Inc.
+Copyright © 2019, 2020, 2021, 2022, 2023 HackEDA, Inc.
 Licensed under the WiPhone Public License v.1.0 (the "License"); you
 may not use this file except in compliance with the License. You may
 obtain a copy of the License at
@@ -35,7 +35,7 @@ governing permissions and limitations under the License.
 void print_system_info();
 void print_memory();
 void test_cpu();
-bool test_memory();
+bool test_memory(uint32_t num_tests);
 void test_ring_buffer();
 
 void listDir(fs::FS &fs, const char * dirname, uint8_t levels);

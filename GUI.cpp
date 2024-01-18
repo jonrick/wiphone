@@ -1,5 +1,5 @@
 /*
-Copyright © 2019, 2020, 2021, 2022 HackEDA, Inc.
+Copyright © 2019, 2020, 2021, 2022, 2023 HackEDA, Inc.
 Licensed under the WiPhone Public License v.1.0 (the "License"); you
 may not use this file except in compliance with the License. You may
 obtain a copy of the License at
@@ -11,7 +11,7 @@ on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
 either express or implied. See the License for the specific language
 governing permissions and limitations under the License.
 */
-
+#define _(X) X//FIXME: move this into a header file.
 #include "GUI.h"
 #include "tinySIP.h"
 #include "ota.h"
@@ -23,7 +23,9 @@ governing permissions and limitations under the License.
 #include "src/assets/image_jpg.h"
 #include "src/assets/ackman_data.h"
 #include <esp_wifi.h>
+#include "ErrorsPopupStrings.h"
 
+extern GUI gui;
 // TODO:
 // - optimization: return DO_NOTHING for irrelevant events
 // - optimization: if event was processed by a widget, return false if it is irrelevant (state not changed)
@@ -34,6 +36,8 @@ bool UDP_SIP = false;
 bool loudSpkr = false;
 bool wifiOn = true;
 
+bool backupWiFiConnected = false;
+char *backupConnectedSsid = nullptr;
 
 uint16_t GUI::batteryExtraLength = 0;
 
@@ -70,7 +74,24 @@ GUI::~GUI() {
     delete mainMenu;
   }
 
+  if (popupApp!=NULL) {
+    delete popupApp;
+    popupApp = NULL;
+  }
+
   cleanAppDynamic();
+}
+
+void GUI::showPopup(char* caption, char* line1, char* line2, char* line3, char* line4, char* btn1, char* btn2,
+                    unsigned char* icon, int iconByteSize) {
+
+  popupApp = new PopupApp(this->lcd, this->state, caption, btn1, btn2,
+                          line1,
+                          line2,
+                          line3,
+                          line4, icon, iconByteSize);
+  popupApp->swapHeaderFooter(&header, &footer);
+  //redrawScreen(false, false, true, false);
 }
 
 void GUI::cleanAppDynamic() {
@@ -274,7 +295,12 @@ void GUI::longBatteryAnimation() {
 // # # # # # # # # # # # # # # # # # # # # # # # # # # # #  CONTROL STATE  # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 ControlState::ControlState(void)
+#ifdef USER_SERIAL
   : userSerialBuffer(USER_SERIAL_BUFFER_SIZE) {
+#else
+  :
+  userSerialBuffer(1) {
+#endif
   sipState = CallState::NotInited;
 
   // Initialize dynamic
@@ -359,6 +385,7 @@ bool ControlState::loadSipAccount() {
     log_d("SIP account not found");
     setSipAccount("", "", "", "");
   }
+  ini.unload();
   return foundAccount;
 }
 
@@ -495,6 +522,9 @@ void showCallState(CallState state) {
   case CallState::Decline:
     log_d("Decline");
     break;
+  case CallState::Busy:
+    log_d("Busy");
+    break;
 
   case CallState::Error:
     log_d("Error");
@@ -578,7 +608,7 @@ void GUI::alphanumericInputEvent(EventType key, EventType& r1, EventType& r2) {
   r1 = 0;
   r2 = 0;
   if (state.inputType!=InputType::AlphaNum) {
-    guiError("unsupported");
+    guiError(_("unsupported"));
     return;
   }
   if (key==WIPHONE_SHIFT_KEY) {
@@ -610,7 +640,7 @@ void GUI::alphanumericInputEvent(EventType key, EventType& r1, EventType& r2) {
       } else if (key==WIPHONE_SYMBOLS_KEY) {
         i = 10;
       } else {
-        guiError("unknown key");
+        guiError(_("unknown key"));
       }
       if (i>=0) {
         strcpy(state.inputSeq, alphNum[i]);
@@ -631,6 +661,29 @@ void GUI::alphanumericInputEvent(EventType key, EventType& r1, EventType& r2) {
 
 appEventResult GUI::processEvent(uint32_t now, EventType event) {
   appEventResult res = DO_NOTHING;
+
+  if(popupApp) {
+    if(EXIT_APP == popupApp->processEvent(event)) {
+      popupApp->swapHeaderFooter(&header, &footer);
+      delete popupApp;
+      popupApp = NULL;
+      this->redrawScreen(true, true, true, true);
+
+      if(footer) {
+        ((GUIWidget*)footer)->redraw(lcd);  //, 0, lcd.height()-30, lcd.width(), 30);
+      }
+      if(header) {
+        ((GUIWidget*)header)->redraw(lcd);  //, 0, 0, lcd.width(), 30);
+      }
+
+
+      res |= (REDRAW_ALL | REDRAW_SCREEN);
+      return res;
+    } else {
+      res |= (REDRAW_ALL | REDRAW_SCREEN);
+      return res;
+    }
+  }
 
   // Pre-process
   EventType keyNext = 0;   // one keypress can generate two inputs sometimes
@@ -883,6 +936,9 @@ appEventResult GUI::processEvent(uint32_t now, EventType event) {
       // Reload messages to display in the messages app (this will also set state.unreadMessages)
       this->reloadMessages();
 
+    } else if (event == MESSAGES_ACK_RECVD_EVENT || event == MESSAGE_SENT_EVENT) {
+      log_d("unreceived >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
+      this->reloadMessages();
     }
 
     // Feed event into specific "apps"
@@ -981,7 +1037,7 @@ appEventResult GUI::processEvent(uint32_t now, EventType event) {
         if (LOGIC_BUTTON_OK(event)) {
           int16_t ci = findMenu(ID);
           if (ci<0) {
-            guiError("menu failed");
+            guiError(_("menu failed"));
             return res;
           }
           if (menu[ci].action == GUI_ACTION_SUBMENU) {
@@ -1096,7 +1152,14 @@ void GUI::redrawScreen(bool redrawHeader, bool redrawFooter, bool redrawScreen, 
 
   if (redrawScreen) {
 
-    if (callApp!=NULL) {
+    if (popupApp!=NULL) {
+      popupApp->resetPush();
+      popupApp->redrawScreen(redrawAll);
+      appScreen = &(popupApp->getScreen());
+      if (redrawAll && popupApp->isWindowed()) {
+        redrawHeader = redrawFooter = true;
+      }
+    } else if (callApp!=NULL) {
 
       callApp->resetPush();
       callApp->redrawScreen(redrawAll);
@@ -1283,15 +1346,14 @@ void GUI::enterMenu(uint16_t ID) {
 
   int16_t menuIndex = findMenu(ID);
   if (menuIndex<0) {
-    guiError("enterMenu failed");
+    guiError(_("enterMenu failed"));
     return;
   }
 
   // Create and populate new widget
   int i, j;
   MenuOptionIconned* option;
-  mainMenu = new MenuWidget(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(),
-                            "**EMPTY**", fonts[AKROBAT_EXTRABOLD_22], N_MENU_ITEMS, 8, false);
+  mainMenu = new MenuWidget(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), "**EMPTY**", fonts[AKROBAT_BOLD_18], N_MENU_ITEMS, 8, false);
   mainMenu->setStyle(MenuWidget::DEFAULT_STYLE, WHITE, NONE, BLACK, WHITE);    // note: regular background color ignored
   for(i=0; i<sizeof(menu)/sizeof(GUIMenuItem); i++) {
     if (menu[i].parent == menu[menuIndex].ID) {
@@ -1375,6 +1437,8 @@ void GUI::enterApp(ActionID_t app) {
   cleanAppDynamic();
   flash.end();
 
+  bool popupViewed = false;
+
   // Change to new app
   switch(app) {
   case GUI_APP_MYAPP:
@@ -1432,6 +1496,36 @@ void GUI::enterApp(ActionID_t app) {
     // NOTE: `lcd` - this app draws to the physical screen directly
     runningApp = new MicTestApp(audio, lcd, state, header, footer);
     break;
+#ifdef SOFTWARE_EXAMPLES
+  case GUI_APP_LEDEXAMPLEAPP:
+    // NOTE : THIS IS AN EXAMPLE LED APP
+    runningApp = new LEDExampleApp(*screen, state, header, footer);
+    break;
+  case GUI_APP_ButtonPressApp:
+    // NOTE : THIS IS AN EXAMPLE BUTTON APP
+    runningApp = new ButtonPressApp(*screen, state, header, footer);
+    break;
+  case GUI_APP_BatteryApp:
+    // NOTE : THIS IS AN EXAMPLE BATTERY APP
+    runningApp = new BatteryApp(*screen, state, header, footer);
+    //ScreenShotTake();
+    break;
+  case GUI_APP_LoRaApp:
+    runningApp = new LoRaTestApp(*screen, state, header, footer);
+    break;
+  case GUI_APP_PeriTestApp:
+    // NOTE : THIS IS AN EXAMPLE PERIPHERAL APP
+    runningApp = new PeriTestApp(*screen, state, header, footer);
+    break;
+  /*case GUI_APP_ScreenshotApp:
+    // NOTE : THIS IS AN EXAMPLE SCREENSHOT APP
+    runningApp = new ScreenshotApp(*screen, state, header, footer);
+    break;*/
+  case GUI_APP_RealTimeApp:
+    // NOTE : THIS IS AN EXAMPLE OF RTC
+    runningApp = new RealTimeApp(*screen, state, header, footer);
+    break;
+#endif // if SOFTWARE_EXAMPLES
   case GUI_APP_RECORDER:
     // NOTE: `lcd` - this app draws to the physical screen directly
     runningApp = new RecorderApp(audio, lcd, state, header, footer);
@@ -1461,17 +1555,39 @@ void GUI::enterApp(ActionID_t app) {
     runningApp = new LedMicApp(audio, *screen, state, header, footer);
     break;
 #endif
+  case GUI_APP_WIFISETTINGS:
+    runningApp = new WiFiSettingsApp(*screen, state, header, footer);
+    break;
   case GUI_APP_EDITWIFI:
-    runningApp = new EditNetworkApp(*screen, state, NULL, header, footer);
+    if(wifiOn) {
+      runningApp = new EditNetworkApp(*screen, state, NULL, header, footer);
+    } else {
+      popupViewed = true;
+      showPopup(WIFI_ERROR_POPUP_HEADER, WIFI_ERR_POPUP_7_1ST_LINE,
+                WIFI_ERR_POPUP_7_2ND_LINE, WIFI_ERR_POPUP_7_3RD_LINE,
+                WIFI_ERR_POPUP_7_4RD_LINE, "", "OK",
+                (unsigned char*)icon_phone_small_w_crossed, sizeof(icon_phone_small_w_crossed));
+    }
     break;
   case GUI_APP_TIME_CONFIG:
     runningApp = new TimeConfigApp(*screen, state, header, footer);
+    break;
+  case GUI_APP_LORA_CONFIG:
+    runningApp = new LoraConfigApp(*screen, state, header, footer);
     break;
   case GUI_APP_SCREEN_CONFIG:
     runningApp = new ScreenConfigApp(*screen, state, header, footer);
     break;
   case GUI_APP_NETWORKS:
-    runningApp = new NetworksApp(*screen, state, header, footer);
+    if(wifiOn) {
+      runningApp = new NetworksApp(*screen, state, header, footer);
+    } else {
+      popupViewed = true;
+      showPopup(NETWORKS_ERROR_POPUP_HEADER, NETWORKS_ERR_POPUP_1_1ST_LINE,
+                NETWORKS_ERR_POPUP_1_2ND_LINE, NETWORKS_ERR_POPUP_1_3RD_LINE,
+                NETWORKS_ERR_POPUP_1_4RD_LINE, "", "OK",
+                (unsigned char*)icon_phone_small_w_crossed, sizeof(icon_phone_small_w_crossed));
+    }
     break;
   case GUI_APP_UDP:
     runningApp = new UdpSenderApp(*screen, state, flash, header, footer);
@@ -1497,9 +1613,11 @@ void GUI::enterApp(ActionID_t app) {
     break;
   }
 
-  // Set current app
-  curApp = app;
-  log_d("entered app: %d", curApp);
+  if(!popupViewed) {
+    // Set current app
+    curApp = app;
+    log_d("entered app: %d", curApp);
+  }
 }
 
 // # # # # # # # # # # # # # # # # # # # # # # # # # # # #  APPEARANCE HELPERS  # # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -1522,7 +1640,8 @@ void GUI::circle(uint16_t x, uint16_t y, uint16_t r, uint16_t col) {
 
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - -  WiPhone app  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-WiPhoneApp::WiPhoneApp(LCD& lcd, ControlState& state) : lcd(lcd), controlState(state), registeredWidgets(0) {
+WiPhoneApp::WiPhoneApp(LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget* footer)
+  : lcd(lcd), controlState(state), registeredWidgets(0), header(header), footer(footer) {
   anyEventLastStack = controlState.msAppTimerEventLast;
   anyEventPeriodStack = controlState.msAppTimerEventPeriod;
 
@@ -1573,7 +1692,7 @@ void WiPhoneApp::addLabelPassword(uint16_t &yOff, LabelWidget*& label, PasswordI
 }
 
 void WiPhoneApp::addInlineLabelInput(uint16_t &yOff, uint16_t labelWidth, LabelWidget*& label, TextInputWidget*& input, const char* labelText, const uint32_t inputSize, InputType inputType) {
-  label = new LabelWidget(0, yOff, labelWidth, 25, labelText, WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::RIGHT_TO_LEFT, 8);
+  label = new LabelWidget(0, yOff, labelWidth, 25, labelText, WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
   input = new TextInputWidget(labelWidth, yOff, lcd.width()-labelWidth, 25, controlState, inputSize, fonts[AKROBAT_BOLD_18], inputType, 3);
   yOff += input->height();
 }
@@ -1600,13 +1719,13 @@ void WiPhoneApp::addLabelSlider(uint16_t &yOff, LabelWidget*& label, IntegerSlid
 
 void WiPhoneApp::addInlineLabelSlider(uint16_t &yOff, uint16_t labelWidth, LabelWidget*& label, IntegerSliderWidget*& input, const char* labelText,
                                       int minVal, int maxVal, const char* unit, int steps) {
-  label = new LabelWidget(0, yOff, labelWidth, 25, labelText, WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::RIGHT_TO_LEFT, 8);
+  label = new LabelWidget(0, yOff, labelWidth, 25, labelText, WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
   input = new IntegerSliderWidget(labelWidth, yOff, lcd.width() - labelWidth, 25, minVal, maxVal, (maxVal-minVal)/steps, true, unit);
   yOff += input->height();
 }
 
 void WiPhoneApp::addInlineLabelYesNo(uint16_t &yOff, uint16_t labelWidth, LabelWidget*& label, YesNoWidget*& input, const char* labelText) {
-  label = new LabelWidget(0, yOff, labelWidth, 25, labelText, WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::RIGHT_TO_LEFT, 8);
+  label = new LabelWidget(0, yOff, labelWidth, 25, labelText, WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
   input = new YesNoWidget(labelWidth, yOff, lcd.width()-labelWidth, 25, fonts[AKROBAT_BOLD_18]);
   yOff += input->height();
 }
@@ -1682,7 +1801,7 @@ void FocusableApp::deactivateFocusable() {
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - -  Windowed app  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 WindowedApp::WindowedApp(LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget* footer)
-  : WiPhoneApp(lcd, state), header(header), footer(footer) {
+  : WiPhoneApp(lcd, state, header, footer) {
 //  this->title = NULL;
 //  this->leftButtonName = NULL;
 //  this->rightButtonName = NULL;
@@ -1726,8 +1845,8 @@ OtaApp::OtaApp(LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget
   controlState.msAppTimerEventPeriod = 500;
 
   // Create and arrange widgets
-  header->setTitle("Firmware Update");
-  footer->setButtons("Save", "Clear");
+  header->setTitle(_("Firmware Update"));
+  footer->setButtons(_("Save"), _("Clear"));
 
   clearRect = new RectWidget(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), WP_COLOR_1);
 
@@ -1735,7 +1854,7 @@ OtaApp::OtaApp(LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget
   const uint16_t spacing = 4;
   uint16_t yOff = header->height() + 26;
 
-  urlLabel = new LabelWidget(0, yOff, lcd.width(), 25, "URL:", WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
+  urlLabel = new LabelWidget(0, yOff, lcd.width(), 25, _("URL:"), WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
   yOff += urlLabel->height();
 
   url = new TextInputWidget(0, yOff, lcd.width(), 35, controlState, 100, fonts[AKROBAT_BOLD_20], InputType::AlphaNum, 8);
@@ -1743,12 +1862,12 @@ OtaApp::OtaApp(LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget
   url->setText(ota.getIniUrl());
   yOff += url->height();
 
-  autoLabel = new LabelWidget(0, yOff, lcd.width(), 25, "Auto Update:", WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
+  autoLabel = new LabelWidget(0, yOff, lcd.width(), 25, _("Auto Update:"), WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
   yOff += autoLabel->height();
 
   autoUpdate = new ChoiceWidget(0, yOff, lcd.width(), 35);
-  autoUpdate->addChoice("Yes");
-  autoUpdate->addChoice("No");
+  autoUpdate->addChoice(_("Yes"));
+  autoUpdate->addChoice(_("No"));
   yOff += autoUpdate->height();
 
   if (ota.autoUpdateEnabled()) {
@@ -1758,7 +1877,7 @@ OtaApp::OtaApp(LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget
   }
 
   char device_version[400] = {0};
-  snprintf(device_version, sizeof(device_version), "Dev: %s  Srv: ", FIRMWARE_VERSION);
+  snprintf(device_version, sizeof(device_version), _("Dev: %s  Srv: "), FIRMWARE_VERSION);
 
   deviceVersion = new LabelWidget(0, yOff, lcd.width(), 25, device_version, WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
   yOff += deviceVersion->height();
@@ -1766,9 +1885,9 @@ OtaApp::OtaApp(LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget
   lastInstall = new LabelWidget(0, yOff, lcd.width(), 25, "", WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
   yOff += lastInstall->height();
 
-  checkForUpdates = new ButtonWidget(0, yOff, "Check");
-  reset = new ButtonWidget(60, yOff, "Reset");
-  installUpdates = new ButtonWidget(120, yOff, "Install");
+  checkForUpdates = new ButtonWidget(0, yOff, _("Check"));
+  reset = new ButtonWidget(60, yOff, _("Reset"));
+  installUpdates = new ButtonWidget(120, yOff, _("Install"));
 
   setDataFromOtaFile(ota);
 
@@ -1825,6 +1944,8 @@ OtaApp::~OtaApp() {
 }
 appEventResult OtaApp::processEvent(EventType event) {
   appEventResult res = DO_NOTHING;
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
   FocusableWidget* focusedWidget = getFocused();
 
   if (manualUpdateRequested) {
@@ -1862,7 +1983,7 @@ appEventResult OtaApp::processEvent(EventType event) {
     nextFocus(event == WIPHONE_KEY_DOWN);
   } else if (event == WIPHONE_KEY_OK && focusedWidget == checkForUpdates) {
     manualCheckRequested = true;
-    lastInstall->setText("Checking...");
+    lastInstall->setText(_("Checking..."));
     res |= REDRAW_SCREEN;
   } else if (event == WIPHONE_KEY_OK && focusedWidget == reset) {
     Ota o("");
@@ -1876,7 +1997,7 @@ appEventResult OtaApp::processEvent(EventType event) {
     res |= REDRAW_SCREEN;
   } else if (event == WIPHONE_KEY_OK && focusedWidget == installUpdates) {
     manualUpdateRequested = true;
-    lastInstall->setText("Restarting...");
+    lastInstall->setText(_("Restarting..."));
     res |= REDRAW_SCREEN;
   } else if (LOGIC_BUTTON_OK(event)) {
 
@@ -1933,15 +2054,15 @@ MyApp::MyApp(Audio* audio, LCD& lcd, ControlState& state, HeaderWidget* header, 
   const char* s;
 
   // Create and arrange widgets
-  header->setTitle("MyApp Demo");
-  footer->setButtons("Yes", "No");
+  header->setTitle(_("MyApp Demo"));
+  footer->setButtons(_("Yes"), _("No"));
   clearRect = new RectWidget(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), WP_COLOR_1);
 
   // State caption in the middle
   const uint16_t spacing = 4;
   uint16_t yOff = header->height() + 26;
   demoCaption = new LabelWidget(0, yOff, lcd.width(), fonts[AKROBAT_BOLD_20]->height(),
-                                "Hello World", WP_ACCENT_S, WP_COLOR_1, fonts[AKROBAT_BOLD_20], LabelWidget::CENTER);
+                                _("Hello World"), WP_ACCENT_S, WP_COLOR_1, fonts[AKROBAT_BOLD_20], LabelWidget::CENTER);
   yOff += demoCaption->height() + (spacing*2);
 
   // Make an icon
@@ -1958,7 +2079,7 @@ MyApp::MyApp(Audio* audio, LCD& lcd, ControlState& state, HeaderWidget* header, 
   // Debug string: shows some simple debug info
   //yOff += uriCaption->height() + 20;
   //s = controlState.lastReasonDyn != NULL ? (const char*) controlState.lastReasonDyn : "";
-  s = "I'm Awesome!";
+  s = _("I'm Awesome!");
   debugCaption = new LabelWidget(0, yOff, lcd.width(), fonts[AKROBAT_BOLD_16]->height(), s, WP_DISAB_0, WP_COLOR_1, fonts[AKROBAT_BOLD_16], LabelWidget::CENTER);
 
   //reasonHash = hash_murmur(controlState.lastReasonDyn);
@@ -1977,17 +2098,33 @@ MyApp::~MyApp() {
 appEventResult MyApp::processEvent(EventType event) {
   log_d("processEvent MyApp");
   appEventResult res = DO_NOTHING;
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
 
   if (LOGIC_BUTTON_BACK(event)) {
 
-    demoCaption->setText("Back Button");
+    demoCaption->setText(_("Back Button"));
     res |= REDRAW_SCREEN;
+    if (controlState.myappstate==0) {
+      controlState.myappstate=0;
+    }
+    if (controlState.myappstate==1) {
+      controlState.myappstate=2;
+    }
 
   } else if (LOGIC_BUTTON_OK(event)) {
 
-    demoCaption->setText("OK Button");
-    footer->setButtons("OH", "NO");
-    res |= REDRAW_SCREEN | REDRAW_FOOTER;
+    demoCaption->setText(_("OK Button"));
+    if(controlState.myappstate==0) {
+      footer->setButtons(_("OK"), _("Back"));
+      res |= REDRAW_SCREEN | REDRAW_FOOTER;
+      controlState.myappstate=1;
+    }
+    if(controlState.myappstate==1) {
+      footer->setButtons(_("OK"), _("Back"));
+      res |= REDRAW_SCREEN | REDRAW_FOOTER;
+      controlState.myappstate=1;
+    }
 
   } else if (event == WIPHONE_KEY_UP || event == WIPHONE_KEY_DOWN) {
 
@@ -2000,11 +2137,23 @@ appEventResult MyApp::processEvent(EventType event) {
     audio->setVolumes(earpieceVol, headphonesVol, loudspeakerVol);
     audio->getVolumes(earpieceVol, headphonesVol, loudspeakerVol);
     char buff[70];
-    snprintf(buff, sizeof(buff), "Speaker %d dB, Headphones %d dB, Loudspeaker %d dB",  earpieceVol, headphonesVol, loudspeakerVol);
+    snprintf(buff, sizeof(buff), _("Speaker %d dB, Headphones %d dB, Loudspeaker %d dB"),  earpieceVol, headphonesVol, loudspeakerVol);
     debugCaption->setText(buff);
-    
-  }
 
+  }
+  if (event == WIPHONE_KEY_END  ) {
+    //end program //exit
+    return EXIT_APP;
+  }
+  if(controlState.myappstate==1 and ( event == WIPHONE_KEY_BACK or LOGIC_BUTTON_BACK(event))) {
+    log_i("exit attempt");
+    return EXIT_APP;
+  }
+  if (controlState.myappstate==2) {
+    controlState.myappstate=0;
+    log_i("exit attempt2");
+    return EXIT_APP;
+  }
   return res;
 }
 
@@ -2060,21 +2209,21 @@ UartPassthroughApp::UartPassthroughApp(LCD& lcd, ControlState& state, HeaderWidg
   const uint16_t spacing = 4;
   uint16_t yOff = header->height() + 26;
 
-  baudLabel = new LabelWidget(0, yOff, lcd.width(), 25, "Baud:", WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
+  baudLabel = new LabelWidget(0, yOff, lcd.width(), 25, _("Baud:"), WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
   yOff += baudLabel->height();
 
   baud = new TextInputWidget(0, yOff, lcd.width(), 35, controlState, 100, fonts[AKROBAT_BOLD_20], InputType::AlphaNum, 8);
   yOff += baud->height();
 
-  echoLabel = new LabelWidget(0, yOff, 100, 25, "Echo:", WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
+  echoLabel = new LabelWidget(0, yOff, 100, 25, _("Echo:"), WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
 
   echo = new ChoiceWidget(105, yOff, lcd.width()-110, 35);
-  echo->addChoice("Yes");
-  echo->addChoice("No");
+  echo->addChoice(_("Yes"));
+  echo->addChoice(_("No"));
   echo->setValue(1);
   yOff += echo->height();
 
-  startStop = new ButtonWidget(0, yOff, "Start");
+  startStop = new ButtonWidget(0, yOff, _("Start"));
 
   addFocusableWidget(baud);
   addFocusableWidget(echo);
@@ -2167,7 +2316,7 @@ appEventResult UartPassthroughApp::processEvent(EventType event) {
   if (LOGIC_BUTTON_OK(event) && focusedWidget == startStop) {
     if (!startedSerial) {
       startedSerial = true;
-      ((ButtonWidget*) focusedWidget)->setText("stop");
+      ((ButtonWidget*) focusedWidget)->setText(_("stop"));
 
       const uart_config_t uart_config = {
         .baud_rate = atoi(baud->getText()),
@@ -2183,7 +2332,11 @@ appEventResult UartPassthroughApp::processEvent(EventType event) {
       uart_driver_install(UART_NUM_0, RX_BUF_SIZE * 2, 0, 0, NULL, 0);
 
       uart_param_config(UART_NUM_1, &uart_config);
+#ifdef USER_SERIAL
       uart_set_pin(UART_NUM_1, USER_SERIAL_TX, USER_SERIAL_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+#else
+      // nothing to do because no user_serial used
+#endif
       uart_driver_install(UART_NUM_1, RX_BUF_SIZE * 2, 0, 0, NULL, 0);
 
       switch (echo->getValue()) {
@@ -2203,7 +2356,7 @@ appEventResult UartPassthroughApp::processEvent(EventType event) {
       }
     } else {
       startedSerial = false;
-      ((ButtonWidget*) focusedWidget)->setText("start");
+      ((ButtonWidget*) focusedWidget)->setText(_("Start"));
 
       if (xHandle0 != NULL) {
         vTaskDelete(xHandle0);
@@ -2353,12 +2506,12 @@ NotepadApp::NotepadApp(LCD& lcd, ControlState& state, Storage& flashParam, Heade
   : WindowedApp(lcd, state, header, footer), flash(flashParam) {
   log_i("create NotepadApp");
 
-  header->setTitle("Note Page");
-  footer->setButtons("Save", "Clear");
+  header->setTitle(_("Note Page"));
+  footer->setButtons(_("Save"), _("Clear"));
 
   const int16_t padding =  4;
   textArea = new MultilineTextWidget(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(),
-                                     "Empty page", state, NotepadApp::maxNotepadSize, fonts[OPENSANS_COND_BOLD_20], InputType::AlphaNum, padding, padding);
+                                     _("Empty page"), state, NotepadApp::maxNotepadSize, fonts[OPENSANS_COND_BOLD_20], InputType::AlphaNum, padding, padding);
   textArea->setColors(WP_COLOR_0, WP_COLOR_1);
 
   // Get notepad string dynamically
@@ -2395,7 +2548,7 @@ appEventResult NotepadApp::processEvent(EventType event) {
     return EXIT_APP;
   }
   textArea->processEvent(event);
-  return REDRAW_SCREEN;
+  return REDRAW_SCREEN | REDRAW_HEADER /*animate/blink charge icon*/;
 }
 
 void NotepadApp::redrawScreen(bool redrawAll) {
@@ -2409,8 +2562,8 @@ DialingApp::DialingApp(Audio* audio, LCD& disp, LCD& hardDisp, ControlState& sta
   : WindowedApp(disp, state, header, footer), FocusableApp(1), audio(audio), hardDisp(hardDisp) {
   log_d("create DialingApp");
 
-  header->setTitle("Dialing");
-  footer->setButtons("Call", "Clear");
+  header->setTitle(_("Dialing"));
+  footer->setButtons(_("Call"), _("Clear"));
 
   uint16_t yOff = header->height();
   this->errorLabel = new LabelWidget(0, yOff, lcd.width(), 65, "", TFT_RED, WP_COLOR_0, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
@@ -2444,8 +2597,8 @@ appEventResult DialingApp::processEvent(EventType event) {
       delete callApp;
       callApp = NULL;
       screenInited = false;
-      header->setTitle("Dialing");
-      footer->setButtons("Call", "Clear");
+      header->setTitle(_("Dialing"));
+      footer->setButtons(_("Call"), _("Clear"));
       return REDRAW_ALL;
     }
     return res;
@@ -2466,7 +2619,7 @@ appEventResult DialingApp::processEvent(EventType event) {
       return REDRAW_ALL;
     } else {
       this->error = true;
-      this->errorLabel->setText("Not connected to SIP server");
+      this->errorLabel->setText(_("Not connected to SIP server"));
     }
   } else if (event == WIPHONE_KEY_END) {
     return EXIT_APP;
@@ -2475,7 +2628,13 @@ appEventResult DialingApp::processEvent(EventType event) {
     event = '+';  // temporary solution to allow + input
   }
   textArea->processEvent(event);
-  return REDRAW_SCREEN;
+
+  if(textArea->getText()[0] == '\0') {
+    // the last click on the clear button should exit. related to issue #141.
+    return EXIT_APP;
+  }
+
+  return REDRAW_SCREEN | /*animate/blink charge icon*/REDRAW_HEADER;
 }
 
 void DialingApp::redrawScreen(bool redrawAll) {
@@ -2506,11 +2665,11 @@ UdpSenderApp::UdpSenderApp(LCD& lcd, ControlState& state, Storage& pref, HeaderW
   bgRect = new RectWidget(0, yOff, lcd.width(), lcd.height() - yOff - footer->height(), WP_COLOR_1);
 
   // Create and arrange widgets
-  addLabelInput(yOff, labels[0], inputs[0], "Destination IP:", 16);
-  addLabelInput(yOff, labels[1], inputs[1], "Port:", 6);
-  addLabelInput(yOff, labels[2], inputs[2], "Text:", 100);
+  addLabelInput(yOff, labels[0], inputs[0], _("Destination IP:"), 16);
+  addLabelInput(yOff, labels[1], inputs[1], _("Port:"), 6);
+  addLabelInput(yOff, labels[2], inputs[2], _("Text:"), 100);
   yOff += 9;
-  sendButton = new ButtonWidget(2, yOff, "Send");
+  sendButton = new ButtonWidget(2, yOff, _("Send"));
 
   options = NULL;
   memset(shortcutLabels, 0, sizeof(shortcutLabels));
@@ -2618,15 +2777,15 @@ void UdpSenderApp::changeState(UdpSenderState_t newState) {
     sendButton->activate();
     setFocus(inputs[0]);
 
-    header->setTitle("UDP sender");
-    footer->setButtons("Options", "Clear");
+    header->setTitle(_("UDP sender"));
+    footer->setButtons(_("Options"), _("Clear"));
 
   } else if (newState == OPTIONS) {
 
     // Create widget
     if (!options) {
       options = new OptionsMenuWidget(0, header->height(), lcd.width(), lcd.height()-header->height()-footer->height());
-      options->addOption("Shortcuts");
+      options->addOption(_("Shortcuts"));
       addFocusableWidget(options);
     }
 
@@ -2637,7 +2796,7 @@ void UdpSenderApp::changeState(UdpSenderState_t newState) {
 
     // Change settings
     header->setTitle("Options");
-    footer->setButtons(NULL, "Back");
+    footer->setButtons(NULL, _("Back"));
 
   } else if (newState == SHORTCUTS) {
 
@@ -2664,8 +2823,8 @@ void UdpSenderApp::changeState(UdpSenderState_t newState) {
     setFocus(shortcutInputs[0]);
 
     // Change settings
-    header->setTitle("Shortcuts");
-    footer->setButtons("Back", "Clear");
+    header->setTitle(_("Shortcuts"));
+    footer->setButtons(_("Back"), _("Clear"));
 
   }
 
@@ -2676,6 +2835,9 @@ void UdpSenderApp::changeState(UdpSenderState_t newState) {
 appEventResult UdpSenderApp::processEvent(EventType event) {
   log_d("processEvent UdpSenderApp: ", event);
   appEventResult res = REDRAW_SCREEN;
+
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
 
   // TODO: clean up this code (group by state)
   if ((event == WIPHONE_KEY_END && appState != SHORTCUTS) || (appState == OPTIONS && event == WIPHONE_KEY_BACK)) {
@@ -2811,19 +2973,21 @@ AudioConfigApp::AudioConfigApp(Audio* audio, LCD& lcd, ControlState& state, Head
   : WindowedApp(lcd, state, header, footer), FocusableApp(2), audio(audio), ini(Storage::ConfigsFile) {
   log_d("create AudioConfigApp");
 
-  header->setTitle("Audio settings");
-  footer->setButtons("Save", "Back");
+  header->setTitle(_("Audio settings"));
+  footer->setButtons(_("Save"), _("Back"));
 
   // Create and arrange widgets
   uint16_t yOff = header->height() + 5;
-  addLabelSlider(yOff, labels[2], sliders[2], "Loudspeaker volume:", Audio::MuteVolume, Audio::MaxLoudspeakerVolume, "dB");
+  addLabelSlider(yOff, labels[3], sliders[3], _("Loudspeaker volume (Media):"), Audio::MutePercentVolume, Audio::MaxPercentVolume, "%",10);
   yOff += 4;
-  addLabelSlider(yOff, labels[1], sliders[1], "Headphones volume:", Audio::MuteVolume, Audio::MaxVolume, "dB");
+  addLabelSlider(yOff, labels[2], sliders[2], _("Loudspeaker volume(Call):"), Audio::MutePercentVolume, Audio::MaxPercentVolume, "%",10);
   yOff += 4;
-  addLabelSlider(yOff, labels[0], sliders[0], "Ear speaker volume:", Audio::MuteVolume, Audio::MaxVolume, "dB");
+  addLabelSlider(yOff, labels[1], sliders[1], _("Headphones volume:"), Audio::MutePercentVolume, Audio::MaxPercentVolume, "%",10);
+  yOff += 4;
+  addLabelSlider(yOff, labels[0], sliders[0], _("Ear speaker volume:"), Audio::MutePercentVolume, Audio::MaxPercentVolume, "%", 10);
 
   // Load preferences
-  int8_t earpieceVol, headphonesVol, loudspeakerVol;
+  int8_t earpieceVol, headphonesVol, loudspeakerVol, loudSpkrVoiceVol;
   audio->getVolumes(earpieceVol, headphonesVol, loudspeakerVol);
   if ((ini.load() || ini.restore()) && !ini.isEmpty()) {
     // Check version of the file format
@@ -2831,14 +2995,15 @@ AudioConfigApp::AudioConfigApp(Audio* audio, LCD& lcd, ControlState& state, Head
     //   log_d("configs file found");
     //   IF_LOG(VERBOSE)
     //   ini.show();
-      if (ini.hasSection("audio")) {
-        log_d("getting audio info");
-        earpieceVol = ini["audio"].getIntValueSafe(earpieceVolField, earpieceVol);
-        headphonesVol = ini["audio"].getIntValueSafe(headphonesVolField, headphonesVol);
-        loudspeakerVol = ini["audio"].getIntValueSafe(loudspeakerVolField, loudspeakerVol);
-      }
+    if (ini.hasSection("audio")) {
+      log_d("getting audio info");
+      earpieceVol = ini["audio"].getIntValueSafe(earpieceVolField, earpieceVol);
+      headphonesVol = ini["audio"].getIntValueSafe(headphonesVolField, headphonesVol);
+      loudspeakerVol = ini["audio"].getIntValueSafe(loudspeakerVolField, loudspeakerVol);
+      loudSpkrVoiceVol = ini["audio"].getIntValueSafe(loudspeakerVoiceVolField, loudSpkrVoiceVol);
+    }
     //}
-     else {
+    else {
       log_e("configs file corrup or unknown format");
       IF_LOG(VERBOSE)
       ini.show();
@@ -2851,20 +3016,238 @@ AudioConfigApp::AudioConfigApp(Audio* audio, LCD& lcd, ControlState& state, Head
     ini["audio"][earpieceVolField] = earpieceVol;
     ini["audio"][headphonesVolField] = headphonesVol;
     ini["audio"][loudspeakerVolField] = loudspeakerVol;
+    ini["audio"][loudspeakerVoiceVolField] = loudSpkrVoiceVol;
     ini.store();
   }
 
   // Set values
-  sliders[0]->setValue(earpieceVol);
-  sliders[1]->setValue(headphonesVol);
-  sliders[2]->setValue(loudspeakerVol);
+  // Save preferences
+  {
+    if ((earpieceVol == -54) ) {
+      sliders[0]->setValue(0) ;
+    } else if ((earpieceVol == -48)) {
+      sliders[0]->setValue(10) ;
+    } else if ((earpieceVol == -42)) {
+      sliders[0]->setValue(20) ;
+    } else if ((earpieceVol == -36)) {
+      sliders[0]->setValue(30) ;
+    } else if ((earpieceVol == -30)) {
+      sliders[0]->setValue(40) ;
+    } else if ((earpieceVol == -24)) {
+      sliders[0]->setValue(50) ;
+    } else if ((earpieceVol == -18)) {
+      sliders[0]->setValue(60) ;
+    } else if ((earpieceVol == -12)) {
+      sliders[0]->setValue(70) ;
+    } else if ((earpieceVol == -6)) {
+      sliders[0]->setValue(80) ;
+    } else if ((earpieceVol == 0)) {
+      sliders[0]->setValue(90) ;
+    } else if ((earpieceVol == 6)) {
+      sliders[0]->setValue(100) ;
+    }
+  }
+  {
+    if ((headphonesVol == -54) ) {
+      sliders[1]->setValue(0);
+    } else if ((headphonesVol == -48)) {
+      sliders[1]->setValue(10);
+    } else if ((headphonesVol == -42)) {
+      sliders[1]->setValue(20);
+    } else if ((headphonesVol == -36)) {
+      sliders[1]->setValue(30);
+    } else if ((headphonesVol == -30)) {
+      sliders[1]->setValue(40);
+    } else if ((headphonesVol == -24)) {
+      sliders[1]->setValue(50);
+    } else if ((headphonesVol == -18)) {
+      sliders[1]->setValue(60);
+    } else if ((headphonesVol == -12)) {
+      sliders[1]->setValue(70);
+    } else if ((headphonesVol == -6)) {
+      sliders[1]->setValue(80);
+    } else if ((headphonesVol == 0)) {
+      sliders[1]->setValue(90);
+    } else if ((headphonesVol == 6)) {
+      sliders[1]->setValue(100);
+    }
+  }
+  {
+    if ((loudspeakerVol == -20) ) {
+      sliders[2]->setValue(0);
+    } else if ((loudspeakerVol == -18)) {
+      sliders[2]->setValue(10);
+    } else if ((loudspeakerVol == -16)) {
+      sliders[2]->setValue(20);
+    } else if ((loudspeakerVol == -14)) {
+      sliders[2]->setValue(30);
+    } else if ((loudspeakerVol == -12)) {
+      sliders[2]->setValue(40);
+    } else if ((loudspeakerVol == -10)) {
+      sliders[2]->setValue(50);
+    } else if ((loudspeakerVol == -8)) {
+      sliders[2]->setValue(60);
+    } else if ((loudspeakerVol == -6)) {
+      sliders[2]->setValue(70);
+    } else if ((loudspeakerVol == -4)) {
+      sliders[2]->setValue(80);
+    } else if ((loudspeakerVol == -2)) {
+      sliders[2]->setValue(90);
+    } else if ((loudspeakerVol == 0)) {
+      sliders[2]->setValue(100);
+    }
+  }
+  {
+    if ((loudSpkrVoiceVol == -66)) {
+      sliders[3]->setValue(0);
+    } else if ((loudSpkrVoiceVol == -60) ) {
+      sliders[3]->setValue(10);
+    } else if ((loudSpkrVoiceVol == -54)) {
+      sliders[3]->setValue(20);
+    } else if ((loudSpkrVoiceVol == -48)) {
+      sliders[3]->setValue(30);
+    } else if ((loudSpkrVoiceVol == -42)) {
+      sliders[3]->setValue(40);
+    } else if ((loudSpkrVoiceVol == -36)) {
+      sliders[3]->setValue(50);
+    } else if ((loudSpkrVoiceVol == -30)) {
+      sliders[3]->setValue(60);
+    } else if ((loudSpkrVoiceVol == -24)) {
+      sliders[3]->setValue(70);
+    } else if ((loudSpkrVoiceVol == -18)) {
+      sliders[3]->setValue(80);
+    } else if ((loudSpkrVoiceVol == -12)) {
+      sliders[3]->setValue(90);
+    } else if ((loudSpkrVoiceVol == -6)) {
+      sliders[3]->setValue(100);
+    }
+  }
+
+
+  if (!ini.hasSection("audio")) {
+    ini.addSection("audio");
+  }
+
+  // Save preferences
+  {
+    if ((sliders[0]->getValue() == 0) ) {
+      earpieceVol = -54;
+    } else if ((sliders[0]->getValue() == 10)) {
+      earpieceVol = -48;
+    } else if ((sliders[0]->getValue() == 20)) {
+      earpieceVol = -42;
+    } else if ((sliders[0]->getValue() == 30)) {
+      earpieceVol = -36;
+    } else if ((sliders[0]->getValue() == 40)) {
+      earpieceVol = -30;
+    } else if ((sliders[0]->getValue() == 50)) {
+      earpieceVol = -24;
+    } else if ((sliders[0]->getValue() == 60)) {
+      earpieceVol = -18;
+    } else if ((sliders[0]->getValue() == 70)) {
+      earpieceVol = -12;
+    } else if ((sliders[0]->getValue() == 80)) {
+      earpieceVol = -6;
+    } else if ((sliders[0]->getValue() == 90)) {
+      earpieceVol = 0;
+    } else if ((sliders[0]->getValue() == 100)) {
+      earpieceVol = 6;
+    }
+  }
+  {
+    if ((sliders[1]->getValue() == 0) ) {
+      headphonesVol = -54;
+    } else if ((sliders[1]->getValue() == 10)) {
+      headphonesVol = -48;
+    } else if ((sliders[1]->getValue() == 20)) {
+      headphonesVol = -42;
+    } else if ((sliders[1]->getValue() == 30)) {
+      headphonesVol = -36;
+    } else if ((sliders[1]->getValue() == 40)) {
+      headphonesVol = -30;
+    } else if ((sliders[1]->getValue() == 50)) {
+      headphonesVol = -24;
+    } else if ((sliders[1]->getValue() == 60)) {
+      headphonesVol = -18;
+    } else if ((sliders[1]->getValue() == 70)) {
+      headphonesVol = -12;
+    } else if ((sliders[1]->getValue() == 80)) {
+      headphonesVol = -6;
+    } else if ((sliders[1]->getValue() == 90)) {
+      headphonesVol = 0;
+    } else if ((sliders[1]->getValue() == 100)) {
+      headphonesVol = 6;
+    }
+  }
+  {
+    if ((sliders[2]->getValue() == 0) ) {
+      loudspeakerVol = -20;
+    } else if ((sliders[2]->getValue() == 10)) {
+      loudspeakerVol = -18;
+    } else if ((sliders[2]->getValue() == 20)) {
+      loudspeakerVol = -16;
+    } else if ((sliders[2]->getValue() == 30)) {
+      loudspeakerVol = -14;
+    } else if ((sliders[2]->getValue() == 40)) {
+      loudspeakerVol = -12;
+    } else if ((sliders[2]->getValue() == 50)) {
+      loudspeakerVol = -10;
+    } else if ((sliders[2]->getValue() == 60)) {
+      loudspeakerVol = -8;
+    } else if ((sliders[2]->getValue() == 70)) {
+      loudspeakerVol = -6;
+    } else if ((sliders[2]->getValue() == 80)) {
+      loudspeakerVol = -4;
+    } else if ((sliders[2]->getValue() == 90)) {
+      loudspeakerVol = -2;
+    } else if ((sliders[2]->getValue() == 100)) {
+      loudspeakerVol = 0;
+    }
+  }
+  {
+    if ((loudSpkrVoiceVol == -66)) {
+      sliders[3]->setValue(0);
+    } else if ((loudSpkrVoiceVol == -60) ) {
+      sliders[3]->setValue(10);
+    } else if ((loudSpkrVoiceVol == -54)) {
+      sliders[3]->setValue(20);
+    } else if ((loudSpkrVoiceVol == -48)) {
+      sliders[3]->setValue(30);
+    } else if ((loudSpkrVoiceVol == -42)) {
+      sliders[3]->setValue(40);
+    } else if ((loudSpkrVoiceVol == -36)) {
+      sliders[3]->setValue(50);
+    } else if ((loudSpkrVoiceVol == -30)) {
+      sliders[3]->setValue(60);
+    } else if ((loudSpkrVoiceVol == -24)) {
+      sliders[3]->setValue(70);
+    } else if ((loudSpkrVoiceVol == -18)) {
+      sliders[3]->setValue(80);
+    } else if ((loudSpkrVoiceVol == -12)) {
+      sliders[3]->setValue(90);
+    } else if ((loudSpkrVoiceVol == -6)) {
+      sliders[3]->setValue(100);
+    }
+  }
+
+  ini["audio"][earpieceVolField] = earpieceVol;
+  ini["audio"][headphonesVolField] = headphonesVol;
+  ini["audio"][loudspeakerVolField] = loudspeakerVol;
+  ini["audio"][loudspeakerVoiceVolField] = loudSpkrVoiceVol;
+  if (ini.store()) {
+    log_d("new audio settings are saved");
+  }
+  ini.unload();
 
   // Set focusables
+  addFocusableWidget(sliders[3]);
   addFocusableWidget(sliders[2]);
   addFocusableWidget(sliders[1]);
   addFocusableWidget(sliders[0]);
 
-  setFocus(sliders[2]);
+  setFocus(sliders[3]);
+  log_d("Volumes are earspkr %d headphone %d loudspkr %d", earpieceVol,headphonesVol,loudspeakerVol );
+
 }
 
 AudioConfigApp::~AudioConfigApp() {
@@ -2884,20 +3267,126 @@ AudioConfigApp::~AudioConfigApp() {
 appEventResult AudioConfigApp::processEvent(EventType event) {
   log_d("processEvent AudioConfigApp: %04x", event);
   appEventResult res = REDRAW_SCREEN;
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
 
   if (event == WIPHONE_KEY_SELECT) {
+    int speakerVol, headphonesVol, loudspeakerVol, loudspeakerVoiceVol;
     // Save preferences
-    int speakerVol = sliders[0]->getValue();
-    int headphonesVol = sliders[1]->getValue();
-    int loudspeakerVol = sliders[2]->getValue();
-    if (!ini.hasSection("audio")) {
-      ini.addSection("audio");
+    {
+      if ((sliders[0]->getValue() == 0) ) {
+        speakerVol = -54;
+      } else if ((sliders[0]->getValue() == 10)) {
+        speakerVol = -48;
+      } else if ((sliders[0]->getValue() == 20)) {
+        speakerVol = -42;
+      } else if ((sliders[0]->getValue() == 30)) {
+        speakerVol = -36;
+      } else if ((sliders[0]->getValue() == 40)) {
+        speakerVol = -30;
+      } else if ((sliders[0]->getValue() == 50)) {
+        speakerVol = -24;
+      } else if ((sliders[0]->getValue() == 60)) {
+        speakerVol = -18;
+      } else if ((sliders[0]->getValue() == 70)) {
+        speakerVol = -12;
+      } else if ((sliders[0]->getValue() == 80)) {
+        speakerVol = -6;
+      } else if ((sliders[0]->getValue() == 90)) {
+        speakerVol = 0;
+      } else if ((sliders[0]->getValue() == 100)) {
+        speakerVol = 6;
+      }
     }
-    ini["audio"][earpieceVolField] = speakerVol;
-    ini["audio"][headphonesVolField] = headphonesVol;
-    ini["audio"][loudspeakerVolField] = loudspeakerVol;
-    ini.store();
-    audio->setVolumes(speakerVol, headphonesVol, loudspeakerVol);
+    {
+      if ((sliders[1]->getValue() == 0) ) {
+        headphonesVol = -54;
+      } else if ((sliders[1]->getValue() == 10)) {
+        headphonesVol = -48;
+      } else if ((sliders[1]->getValue() == 20)) {
+        headphonesVol = -42;
+      } else if ((sliders[1]->getValue() == 30)) {
+        headphonesVol = -36;
+      } else if ((sliders[1]->getValue() == 40)) {
+        headphonesVol = -30;
+      } else if ((sliders[1]->getValue() == 50)) {
+        headphonesVol = -24;
+      } else if ((sliders[1]->getValue() == 60)) {
+        headphonesVol = -18;
+      } else if ((sliders[1]->getValue() == 70)) {
+        headphonesVol = -12;
+      } else if ((sliders[1]->getValue() == 80)) {
+        headphonesVol = -6;
+      } else if ((sliders[1]->getValue() == 90)) {
+        headphonesVol = 0;
+      } else if ((sliders[1]->getValue() == 100)) {
+        headphonesVol = 6;
+      }
+    }
+    {
+      if ((sliders[2]->getValue() == 0) ) {
+        loudspeakerVol = -20;
+      } else if ((sliders[2]->getValue() == 10)) {
+        loudspeakerVol = -18;
+      } else if ((sliders[2]->getValue() == 20)) {
+        loudspeakerVol = -16;
+      } else if ((sliders[2]->getValue() == 30)) {
+        loudspeakerVol = -14;
+      } else if ((sliders[2]->getValue() == 40)) {
+        loudspeakerVol = -12;
+      } else if ((sliders[2]->getValue() == 50)) {
+        loudspeakerVol = -10;
+      } else if ((sliders[2]->getValue() == 60)) {
+        loudspeakerVol = -8;
+      } else if ((sliders[2]->getValue() == 70)) {
+        loudspeakerVol = -6;
+      } else if ((sliders[2]->getValue() == 80)) {
+        loudspeakerVol = -4;
+      } else if ((sliders[2]->getValue() == 90)) {
+        loudspeakerVol = -2;
+      } else if ((sliders[2]->getValue() == 100)) {
+        loudspeakerVol = 0;
+      }
+    }
+    {
+      if ((sliders[3]->getValue() == 0) ) {
+        loudspeakerVoiceVol = -66;
+      } else if ((sliders[3]->getValue() == 10)) {
+        loudspeakerVoiceVol = -60;
+      } else if ((sliders[3]->getValue() == 20)) {
+        loudspeakerVoiceVol = -54;
+      } else if ((sliders[3]->getValue() == 30)) {
+        loudspeakerVoiceVol = -48;
+      } else if ((sliders[3]->getValue() == 40)) {
+        loudspeakerVoiceVol = -42;
+      } else if ((sliders[3]->getValue() == 50)) {
+        loudspeakerVoiceVol = -36;
+      } else if ((sliders[3]->getValue() == 60)) {
+        loudspeakerVoiceVol = -30;
+      } else if ((sliders[3]->getValue() == 70)) {
+        loudspeakerVoiceVol = -24;
+      } else if ((sliders[3]->getValue() == 80)) {
+        loudspeakerVoiceVol = -18;
+      } else if ((sliders[3]->getValue() == 90)) {
+        loudspeakerVoiceVol = -12;
+      } else if ((sliders[3]->getValue() == 100)) {
+        loudspeakerVoiceVol = -6;
+      }
+    }
+
+    if ((ini.load() || ini.restore()) && !ini.isEmpty()) {
+      if (!ini.hasSection("audio")) {
+        ini.addSection("audio");
+      } else if (ini.hasSection("audio")) {
+        ini["audio"][earpieceVolField] = speakerVol;
+        ini["audio"][headphonesVolField] = headphonesVol;
+        ini["audio"][loudspeakerVolField] = loudspeakerVol;
+        ini["audio"][loudspeakerVoiceVolField] = loudspeakerVoiceVol;
+        ini.store();
+        audio->setVolumes(speakerVol, headphonesVol, loudspeakerVol);
+      }
+    }
+    ini.unload();
   }
 
   // TODO: clean up this code (group by state)
@@ -2952,10 +3441,10 @@ ParcelApp::ParcelApp(LCD& lcd, ControlState& state, Storage& pref, HeaderWidget*
 
   // Create and arrange widgets
   log_d("creating widgets");
-  addLabelInput(yOff, labels[0], inputs[0], "Name:", 16);
-  addLabelInput(yOff, labels[1], inputs[1], "Parcel #:", 6);
+  addLabelInput(yOff, labels[0], inputs[0], _("Name:"), 16);
+  addLabelInput(yOff, labels[1], inputs[1], _("Parcel #:"), 6);
   yOff += 9;
-  sendButton = new ButtonWidget(2, yOff, "Send");
+  sendButton = new ButtonWidget(2, yOff, _("Send"));
 
   log_d("null");
   options = NULL;
@@ -3009,7 +3498,7 @@ ParcelApp::ParcelApp(LCD& lcd, ControlState& state, Storage& pref, HeaderWidget*
   log_d("init finished");
 
   yOff += sendButton->height();
-  labels[2] = new LabelWidget(0, yOff, lcd.width(), 25, "Status", WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_16], LabelWidget::LEFT_TO_RIGHT, 8);
+  labels[2] = new LabelWidget(0, yOff, lcd.width(), 25, _("Status"), WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_16], LabelWidget::LEFT_TO_RIGHT, 8);
   log_d("label added");
 }
 
@@ -3269,8 +3758,8 @@ MotorDriverApp::MotorDriverApp(LCD& lcd, ControlState& state, HeaderWidget* head
   : WindowedApp(lcd, state, header, footer) {
   log_d("create MotorDriverApp");
 
-  header->setTitle("Motor driver");
-  footer->setButtons(NULL, "Back");
+  header->setTitle(_("Motor driver"));
+  footer->setButtons(NULL, _("Back"));
 
   udp = new WiFiUDP();
   udp->begin(UDP_SERVER_PORT);
@@ -3279,14 +3768,14 @@ MotorDriverApp::MotorDriverApp(LCD& lcd, ControlState& state, HeaderWidget* head
   // Create text widget
   const uint8_t pad = 4;
   uint16_t yOff = header->height();
-  text = new MultilineTextWidget(0, yOff, lcd.width(), 58, "Empty",
+  text = new MultilineTextWidget(0, yOff, lcd.width(), 58, _("Empty"),
                                  state, 300, fonts[AKROBAT_BOLD_20], InputType::AlphaNum, pad, pad);
   text->setColors(WP_ACCENT_1, WP_COLOR_1);
 
   // Set text
   IPAddress ipAddr = WiFi.localIP();
   char buff[100];
-  sprintf(buff, "Send UDP messages to:\n%d.%d.%d.%d:%d", ipAddr[0], ipAddr[1], ipAddr[2], ipAddr[3], UDP_SERVER_PORT);
+  sprintf(buff, _("Send UDP messages to:\n%d.%d.%d.%d:%d"), ipAddr[0], ipAddr[1], ipAddr[2], ipAddr[3], UDP_SERVER_PORT);
   text->setText(buff);
 
   // Create white background
@@ -3300,12 +3789,12 @@ MotorDriverApp::MotorDriverApp(LCD& lcd, ControlState& state, HeaderWidget* head
   controlState.msAppTimerEventLast = millis();
   controlState.msAppTimerEventPeriod = 25;
 
-  digitalWrite(MotorEN , HIGH);
+  digitalWrite(MotorEN, HIGH);
 }
 
 MotorDriverApp::~MotorDriverApp() {
   log_d("destroy MotorDriverApp");
-  digitalWrite(MotorEN , LOW);
+  digitalWrite(MotorEN, LOW);
 
   udp->stop();
   delete udp;
@@ -3427,8 +3916,8 @@ PinControlApp::PinControlApp(LCD& lcd, ControlState& state, HeaderWidget* header
   : WindowedApp(lcd, state, header, footer) {
   log_d("create PinControlApp");
 
-  header->setTitle("UDP On/Off");
-  footer->setButtons(NULL, "Back");
+  header->setTitle(_("UDP On/Off"));
+  footer->setButtons(NULL, _("Back"));
 
   udp = new WiFiUDP();
   udp->begin(UDP_SERVER_PORT);
@@ -3438,7 +3927,7 @@ PinControlApp::PinControlApp(LCD& lcd, ControlState& state, HeaderWidget* header
   int yOff = header->height();
   bgRect = new RectWidget(0, yOff, lcd.width(), lcd.height() - yOff - footer->height(), WP_COLOR_0);
   yOff += marginY;
-  ledLabel = new LabelWidget(0, yOff, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(), "LED Off", WP_COLOR_1, WP_COLOR_0, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+  ledLabel = new LabelWidget(0, yOff, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(), _("LED Off"), WP_COLOR_1, WP_COLOR_0, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
 
   // Set periodic event
   controlState.msAppTimerEventLast = millis();
@@ -3457,6 +3946,8 @@ PinControlApp::~PinControlApp() {
 appEventResult PinControlApp::processEvent(EventType event) {
   // Exit keys
   appEventResult res = DO_NOTHING;
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
   if (event == APP_TIMER_EVENT) {
 
     // Check for incoming commands
@@ -3477,12 +3968,12 @@ appEventResult PinControlApp::processEvent(EventType event) {
           int yOff = header->height();
           bgRect = new RectWidget(0, yOff, lcd.width(), lcd.height() - yOff - footer->height(), WP_COLOR_1);
           yOff += marginY;
-          ledLabel = new LabelWidget(0, yOff, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(), "LED On", WP_COLOR_0, WP_COLOR_1, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+          ledLabel = new LabelWidget(0, yOff, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(), _("LED On"), WP_COLOR_0, WP_COLOR_1, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
 
         } else if (buff[0]=='F') {
 
           controlState.ledPleaseTurnOff = true;
-          ledLabel->setText("LED: OFF");
+          ledLabel->setText(_("LED: OFF"));
           isOn = false;
           res |= REDRAW_ALL;
 
@@ -3491,7 +3982,7 @@ appEventResult PinControlApp::processEvent(EventType event) {
           int yOff = header->height();
           bgRect = new RectWidget(0, yOff, lcd.width(), lcd.height() - yOff - footer->height(), WP_COLOR_0);
           yOff += marginY;
-          ledLabel = new LabelWidget(0, yOff, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(), "LED Off", WP_COLOR_1, WP_COLOR_0, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+          ledLabel = new LabelWidget(0, yOff, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(), _("LED Off"), WP_COLOR_1, WP_COLOR_0, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
 
         }
       }
@@ -3528,29 +4019,29 @@ PhonebookApp::PhonebookApp(Audio* audio, LCD& lcd, LCD& hardDisp, ControlState& 
   rect   = new RectWidget(0, header->height(), 50 + pad, 50 + (2*pad), WHITE);      // headpic background
   headpic= new RectIconWidget(pad, header->height() + pad, 50, 50, WP_ACCENT_1, icon_person_w, sizeof(icon_person_w));
   contactName = new MultilineTextWidget(rect->width(), header->height(), lcd.width()-rect->width(), rect->height(),
-                                        "(no name)", state, 200, fonts[AKROBAT_EXTRABOLD_22], InputType::AlphaNum, pad, pad);
+                                        _("(no name)"), state, 200, fonts[AKROBAT_EXTRABOLD_22], InputType::AlphaNum, pad, pad);
   contactName->setColors(WP_COLOR_0, WP_COLOR_1);
   contactName->verticalCentering(true);
   yOff += rect->height();
 
   phonePic = new RectIconWidget(0, yOff, 36, 46, WHITE, icon_phone_b, sizeof(icon_phone_b));
   addressView = new MultilineTextWidget(phonePic->width(), yOff, lcd.width() - phonePic->width(), 46,
-                                        "(no number)", state, 200, fonts[AKROBAT_BOLD_18], InputType::AlphaNum, 4, 4);
+                                        _("(no number)"), state, 200, fonts[AKROBAT_BOLD_18], InputType::AlphaNum, 4, 4);
   addressView->setColors(WP_COLOR_0, WP_COLOR_1);
   addressView->verticalCentering(true);
   yOff += phonePic->height();
 
   viewMenu = new MenuWidget(0, yOff, lcd.width(), lcd.height() - yOff - footer->height(),
-                            "Phonebook is empty", fonts[AKROBAT_BOLD_20], 3, 8);
+                            _("Phonebook is empty"), fonts[AKROBAT_BOLD_20], 3, 8);
   viewMenu->setStyle(MenuWidget::DEFAULT_STYLE, WP_COLOR_0, WP_COLOR_1, WP_COLOR_1, WP_ACCENT_1);
-  viewMenu->addOption("Call", NULL, 1001, 1, icon_calling_b, sizeof(icon_calling_b), icon_calling_w, sizeof(icon_calling_w));
-  viewMenu->addOption("Send message", NULL, 1002, 1, icon_message_b, sizeof(icon_message_b), icon_message_w, sizeof(icon_message_w));
+  viewMenu->addOption(_("Call"), NULL, 1001, 1, icon_calling_b, sizeof(icon_calling_b), icon_calling_w, sizeof(icon_calling_w));
+  viewMenu->addOption(_("Send message"), NULL, 1002, 1, icon_message_b, sizeof(icon_message_b), icon_message_w, sizeof(icon_message_w));
 
   // ADDING / EDITING widgets
   yOff = header->height();
-  addLabelInput(yOff, dispNameLabel, dispNameInput, "Name:", 100);
-  addLabelInput(yOff, sipUriLabel, sipUriInput, "SIP URI:", 100);
-  addLabelInput(yOff, loraLabel, loraInput, "LoRa address:", 100);
+  addLabelInput(yOff, dispNameLabel, dispNameInput, _("Name:"), 100);
+  addLabelInput(yOff, sipUriLabel, sipUriInput, _("SIP URI:"), 100);
+  addLabelInput(yOff, loraLabel, loraInput, _("LoRa address:"), 100);
 
   clearRect = new RectWidget(0, yOff, lcd.width(), lcd.height() - yOff - footer->height(), WP_COLOR_1);
 
@@ -3639,8 +4130,8 @@ appEventResult PhonebookApp::changeState(PhonebookAppState_t newState) {
     setFocus(menu);
 
     // Change settings
-    header->setTitle("Phonebook");
-    footer->setButtons("Add", "Back");
+    header->setTitle(_("Phonebook"));
+    footer->setButtons(_("Add"), _("Back"));
 
   } else if (newState == OPTIONS) {
 
@@ -3651,18 +4142,18 @@ appEventResult PhonebookApp::changeState(PhonebookAppState_t newState) {
     if (!options) {
       options = new OptionsMenuWidget(0, header->height(), lcd.width(), lcd.height()-header->height()-footer->height());
       if (options) {
-        options->addOption("Edit", 0x101);
-        options->addOption("Delete", 0x102);
-        options->addOption("Call", 0x103);
-        options->addOption("Send message", 0x104);
+        options->addOption(_("Edit"), 0x101);
+        options->addOption(_("Delete"), 0x102);
+        options->addOption(_("Call"), 0x103);
+        options->addOption(_("Send message"), 0x104);
       }
     }
     options->activate();
     setFocus(options);
 
     // Change settings
-    header->setTitle("Options");
-    footer->setButtons(NULL, "Back");
+    header->setTitle(_("Options"));
+    footer->setButtons(NULL, _("Back"));
 
   } else if (newState == CALLING) {
 
@@ -3711,7 +4202,7 @@ appEventResult PhonebookApp::changeState(PhonebookAppState_t newState) {
     if (newState == ADDING || newState == EDITING) {
       log_d("ADDING / EDITING");
 
-      footer->setButtons("Save", "Clear");
+      footer->setButtons(_("Save"), _("Clear"));
 
       // Activate / deactivate
       dispNameInput->activate();
@@ -3719,13 +4210,13 @@ appEventResult PhonebookApp::changeState(PhonebookAppState_t newState) {
       loraInput->activate();
 
       // Change settings
-      header->setTitle(newState == EDITING ? "Edit contact" : "Create contact");
+      header->setTitle(newState == EDITING ? _("Edit contact") : _("Create contact"));
       setFocus(dispNameInput);
 
     } else if (newState == VIEWING) {
       log_d("VIEWING");
 
-      footer->setButtons("Options", "Back");
+      footer->setButtons(_("Options"), _("Back"));
 
       // Activate / deactivate
       dispNameInput->deactivate();
@@ -3733,7 +4224,7 @@ appEventResult PhonebookApp::changeState(PhonebookAppState_t newState) {
       loraInput->deactivate();
 
       // Change settings
-      header->setTitle("View contact");
+      header->setTitle(_("View contact"));
 
     }
   }
@@ -3750,7 +4241,7 @@ void PhonebookApp::createLoadMenu() {
     delete menu;
   }
   menu = new MenuWidget(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(),
-                        "Phonebook is empty", fonts[AKROBAT_EXTRABOLD_22], N_MENU_ITEMS);
+                        _("Phonebook is empty"), fonts[AKROBAT_EXTRABOLD_22], N_MENU_ITEMS);
   menu->setStyle(MenuWidget::DEFAULT_STYLE, WP_COLOR_0, WP_COLOR_1, WP_COLOR_1, WP_ACCENT_1);   // in original design it used WP_ACCENT_0, but this doesn't make sense: too bright, text cannot be read
 
   // Add all individual addresses
@@ -3770,6 +4261,9 @@ appEventResult PhonebookApp::processEvent(EventType event) {
   log_i("processEvent PhonebookApp");
 
   appEventResult res = DO_NOTHING;
+
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
 
   if (messageApp != NULL) {
 
@@ -3819,7 +4313,7 @@ appEventResult PhonebookApp::processEvent(EventType event) {
 
     if(!wifiState.isConnected() || WiFi.status() != WL_CONNECTED) {
       if (callApp!=NULL) {
-        callApp->setStateCaption("No WiFi Conn");
+        callApp->setStateCaption(_("No WiFi Conn"));
         callApp->redrawScreen(true);
         delay(1000);
         delete callApp;
@@ -3829,7 +4323,7 @@ appEventResult PhonebookApp::processEvent(EventType event) {
       return EXIT_APP;
     } else if (!controlState.isCallPossible()) {
       if (callApp!=NULL) {
-        callApp->setStateCaption("No SIP Conn");
+        callApp->setStateCaption(_("No SIP Conn"));
         callApp->redrawScreen(true);
         delay(1000);
         delete callApp;
@@ -3996,7 +4490,7 @@ void PhonebookApp::becomeCaller() {
     callApp = new CallApp(this->audio, this->hardDisp, this->controlState, true, this->header, this->footer);
 
     if (callApp!=NULL) {
-      callApp->setStateCaption("No SIP URI");
+      callApp->setStateCaption(_("No SIP URI"));
       callApp->redrawScreen(true);
       delay(1000);
       delete callApp;
@@ -4148,20 +4642,20 @@ SipAccountsApp::SipAccountsApp(LCD& lcd, ControlState& state, Storage& flash, He
   rect   = new RectWidget(0, header->height(), 50 + pad, 50 + (2*pad), WHITE);      // headpic background
   headpic= new RectIconWidget(pad, header->height() + pad, 50, 50, WP_ACCENT_1, icon_person_w, sizeof(icon_person_w));
   contactName = new MultilineTextWidget(rect->width(), header->height(), lcd.width()-rect->width(), rect->height(),
-                                        "(no name)", state, 200, fonts[AKROBAT_EXTRABOLD_22], InputType::AlphaNum, pad, pad);
+                                        _("(no name)"), state, 200, fonts[AKROBAT_EXTRABOLD_22], InputType::AlphaNum, pad, pad);
   contactName->setColors(WP_COLOR_0, WP_COLOR_1);
   contactName->verticalCentering(true);
   yOff += rect->height();
 
   phonePic = new RectIconWidget(0, yOff, 36, 46, WHITE, icon_phone_b, sizeof(icon_phone_b));
   addressView = new MultilineTextWidget(phonePic->width(), yOff, lcd.width() - phonePic->width(), 46,
-                                        "(no number)", state, 200, fonts[AKROBAT_BOLD_18], InputType::AlphaNum, 4, 4);
+                                        _("(no number)"), state, 200, fonts[AKROBAT_BOLD_18], InputType::AlphaNum, 4, 4);
   addressView->setColors(WP_COLOR_0, WP_COLOR_1);
   addressView->verticalCentering(true);
   yOff += phonePic->height();
 
   viewMenu = new MenuWidget(0, yOff, lcd.width(), lcd.height() - yOff - footer->height(),
-                            "No SIP accounts", fonts[AKROBAT_BOLD_20], 3, 8);
+                            _("No SIP accounts"), fonts[AKROBAT_BOLD_20], 3, 8);
   viewMenu->setStyle(MenuWidget::DEFAULT_STYLE, WP_COLOR_0, WP_COLOR_1, WP_COLOR_1, WP_ACCENT_1);
 
   // ADDING / EDITING widgets
@@ -4169,10 +4663,10 @@ SipAccountsApp::SipAccountsApp(LCD& lcd, ControlState& state, Storage& flash, He
 
   // - create and arrange widgets
   clearRect = new RectWidget(0, yOff, lcd.width(), lcd.height() - yOff - footer->height(), WP_COLOR_1);
-  addLabelInput(yOff, inputLabels[0], inputs[0], "Name:", 100);
-  addDoubleLabelInput(yOff, inputLabels[1], inputs[1], "User:", 50, inputLabels[2], inputs[2], "Server:", 50);
-  addLabelInput(yOff, inputLabels[3], inputs[3], "SIP URI:", 100);
-  addLabelPassword(yOff, inputLabels[4], passwordInput, "Password:", lcd.width()/2);
+  addLabelInput(yOff, inputLabels[0], inputs[0], _("Name:"), 100);
+  addDoubleLabelInput(yOff, inputLabels[1], inputs[1], _("User:"), 50, inputLabels[2], inputs[2], _("Server:"), 50);
+  addLabelInput(yOff, inputLabels[3], inputs[3], _("SIP URI:"), 100);
+  addLabelPassword(yOff, inputLabels[4], passwordInput, _("Password:"), lcd.width()/2);
 
   udpTcpSipSelection = new ChoiceWidget(lcd.width()/2, yOff-passwordInput->height(), lcd.width()/2, 35);
   udpTcpSipSelection->addChoice("UDP-SIP");
@@ -4242,8 +4736,8 @@ void SipAccountsApp::changeState(SipAccountsAppState_t newState) {
     setFocus(menu);
 
     // Change settings
-    header->setTitle("SIP accounts");
-    footer->setButtons("Add", "Back");
+    header->setTitle(_("SIP accounts"));
+    footer->setButtons(_("Add"), _("Back"));
 
   } else {      // ADDING / VIEWING / EDITING
 
@@ -4296,8 +4790,8 @@ void SipAccountsApp::changeState(SipAccountsAppState_t newState) {
       if (newState==VIEWING) {
         viewMenu->deleteAll();
         viewMenu->addOption("Edit", NULL, 1003, 1, icon_edit_b, sizeof(icon_edit_b), icon_edit_w, sizeof(icon_edit_w));
-        viewMenu->addOption(primary ? "Unmake primary" : "Make primary", NULL, 1004, 1, icon_edit_b, sizeof(icon_edit_b), icon_edit_w, sizeof(icon_edit_w));
-        viewMenu->addOption("Delete", NULL, 1009, 1, icon_delete_r, sizeof(icon_delete_r), icon_delete_w, sizeof(icon_delete_w));
+        viewMenu->addOption(primary ? _("Unmake primary") : _("Make primary"), NULL, 1004, 1, icon_edit_b, sizeof(icon_edit_b), icon_edit_w, sizeof(icon_edit_w));
+        viewMenu->addOption(_("Delete"), NULL, 1009, 1, icon_delete_r, sizeof(icon_delete_r), icon_delete_w, sizeof(icon_delete_w));
       }
 
     } else {
@@ -4317,7 +4811,7 @@ void SipAccountsApp::changeState(SipAccountsAppState_t newState) {
     if (newState == ADDING || newState == EDITING) {
       log_d("ADDING / EDITING");
 
-      footer->setButtons("Save", "Clear");
+      footer->setButtons(_("Save"), _("Clear"));
 
       // Activate / deactivate
       for (int i=0; i<sizeof(inputs)/sizeof(inputs[0])-1; i++) {   // don't add SIP URI into focusable - it's autofilled
@@ -4327,13 +4821,13 @@ void SipAccountsApp::changeState(SipAccountsAppState_t newState) {
       udpTcpSipSelection->activate();
 
       // Change settings
-      header->setTitle(newState == EDITING ? "Edit account" : "Create account");
+      header->setTitle(newState == EDITING ? _("Edit account") : _("Create account"));
       setFocus(inputs[0]);
 
     } else if (newState == VIEWING) {
       log_d("VIEWING");
 
-      footer->setButtons("Select", "Back");
+      footer->setButtons(_("Select"), _("Back"));
 
       // Activate / deactivate
       for (int i=0; i<sizeof(inputs)/sizeof(TextInputWidget*)-1; i++) {   // don't add SIP URI into focusable - it's autofilled
@@ -4343,7 +4837,7 @@ void SipAccountsApp::changeState(SipAccountsAppState_t newState) {
       udpTcpSipSelection->deactivate();
 
       // Change settings
-      header->setTitle("View account");
+      header->setTitle(_("View account"));
 
     }
   }
@@ -4378,6 +4872,9 @@ appEventResult SipAccountsApp::processEvent(EventType event) {
   //log_d("processEvent SipAccountsApp");
 
   appEventResult res = REDRAW_SCREEN;     // TODO: return DO_NOTHING on irrelevant events
+
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
 
   if (appState==SELECTING) {
     // Exit keys
@@ -4432,7 +4929,7 @@ appEventResult SipAccountsApp::processEvent(EventType event) {
           changeState(EDITING);
           res |= REDRAW_ALL;
 
-        } else if (sel==1004) {
+        } else if (sel==1004 && (strcmp(inputs[1]->getText(), "") != 0) && (strcmp(inputs[2]->getText(), "") != 0)) {
 
           // "Primary" toggle for a SIP account
 
@@ -4446,13 +4943,24 @@ appEventResult SipAccountsApp::processEvent(EventType event) {
             // Set a primary flag for current record (if it was absent before)
             if (!primary) {
               ini[currentKey]["m"] = "y";  // make current record primary ("main = yes")
+
+              // Change current SIP account in memory
+              controlState.setSipAccount(ini[currentKey].getValueSafe("d", ""),
+                                         ini[currentKey].getValueSafe("s", ""),
+                                         ini[currentKey].getValueSafe("p", ""),
+                                         ini[currentKey].getValueSafe("u", ""));
+            } else {
+              // unregister SIP account
+
+              // Change current SIP account in memory
+              controlState.setSipAccount("",
+                                         "",
+                                         "",
+                                         "");
+              controlState.sipEnabled = false;
+              controlState.sipRegistered = false;
             }
 
-            // Change current SIP account in memory
-            controlState.setSipAccount(ini[currentKey].getValueSafe("d", ""),
-                                       ini[currentKey].getValueSafe("s", ""),
-                                       ini[currentKey].getValueSafe("p", ""),
-                                       ini[currentKey].getValueSafe("u", ""));
             res |= REDRAW_HEADER;   // redraw SIP icon (if any)
 
             // Store changes
@@ -4465,6 +4973,13 @@ appEventResult SipAccountsApp::processEvent(EventType event) {
             changeState(VIEWING);
             res |= REDRAW_ALL;
           }
+        } else if (sel==1004 && ((strcmp(inputs[1]->getText(), "") == 0) || (strcmp(inputs[2]->getText(), "") == 0))) {
+          controlState.setSipAccount("",
+                                     "",
+                                     "",
+                                     "");
+          controlState.sipEnabled = false;
+          controlState.sipRegistered = false;
         } else if (sel==1009) {
           // "Delete" option selected
           if (currentKey < ini.nSections() && ini[currentKey].hasKey("m")) {
@@ -4537,13 +5052,22 @@ appEventResult SipAccountsApp::processEvent(EventType event) {
         }
 
         // Change current SIP account in memory
-        if (ini[currentKey].hasKey("m")) {
+        if (ini[currentKey].hasKey("m")  && ((strcmp(inputs[1]->getText(), "") != 0) && (strcmp(inputs[2]->getText(), "") != 0))) {
           // this is a primary account -> update it in memory
           controlState.setSipAccount(ini[currentKey].getValueSafe("d", ""),
                                      ini[currentKey].getValueSafe("s", ""),
                                      ini[currentKey].getValueSafe("p", ""),
                                      ini[currentKey].getValueSafe("u", ""));
           res |= REDRAW_HEADER;   // redraw SIP icon (if any)
+        } else if (ini[currentKey].hasKey("m") && ((strcmp(inputs[1]->getText(), "") == 0) || (strcmp(inputs[2]->getText(), "") == 0))) {
+          //ini[currentKey]["m"] = "";
+          ini.clearUniqueFlag("m");
+          controlState.setSipAccount("",
+                                     "",
+                                     "",
+                                     "");
+          controlState.sipEnabled = false;
+          controlState.sipRegistered = false;
         }
 
         // TODO: sort and update currentKey to newKey
@@ -4653,23 +5177,172 @@ void SipAccountsApp::redrawScreen(bool redrawAll) {
   screenInited = true;
 }
 
+
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - -  Popup app  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+PopupApp::PopupApp(LCD& lcd, ControlState& state, char* caption, char* btn1, char* btn2,
+                   char* PARAMETERmessageLine1, char* PARAMETERmessageLine2,
+                   char* PARAMETERmessageLine3, char* PARAMETERmessageLine4,
+                   const unsigned char* PARAMETERicon, int PARAMETERiconsize)
+  : WindowedApp(lcd, state, nullptr, nullptr), FocusableApp(2) {
+  log_d("PopupApp create");
+  const char* s;
+
+  //PopupApp destructor responsible for deleting header and footer objects.
+  header = new HeaderWidget(caption, state);
+  footer = new FooterWidget(btn1, btn2, state);
+  header->setTitle(caption);
+  footer->setButtons(btn1, btn2);
+
+  // Create and arrange widgets
+  clearRect = new RectWidget(15, header->height()+35, lcd.width()-30, lcd.height() - header->height() - footer->height()-70, GRAY_80);
+
+  // State caption in the middle
+  const uint16_t spacing = 4;
+
+  uint16_t yOff = header->height() + 35;
+
+  log_i("PopupApp LastReason icon_person_w");
+  // Headpic icon
+  iconRect = new RectIconWidget((lcd.width()-20)>>1, yOff, 20, 20, WP_ACCENT_1, PARAMETERicon, PARAMETERiconsize);
+  yOff += iconRect->height() + (spacing*2);
+
+  s = "Warning"; // TODO this may come from PARAMETERs.
+  nameCaption =  new LabelWidget(15, yOff, lcd.width()-30, fonts[AKROBAT_EXTRABOLD_22]->height(), s, WP_ACCENT_1, GRAY_80, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+  yOff += nameCaption->height() + spacing;
+
+  stateCaptionLine1 = new LabelWidget(15, yOff, lcd.width()-30, fonts[AKROBAT_BOLD_20]->height(), PARAMETERmessageLine1, WP_COLOR_0, GRAY_80, fonts[AKROBAT_BOLD_20], LabelWidget::CENTER);
+  yOff += stateCaptionLine1->height() + (spacing*2);
+
+  stateCaptionLine2 = new LabelWidget(15, yOff, lcd.width()-30, fonts[AKROBAT_BOLD_20]->height(), PARAMETERmessageLine2, WP_COLOR_0, GRAY_80, fonts[AKROBAT_BOLD_20], LabelWidget::CENTER);
+  yOff += stateCaptionLine2->height() + (spacing*2);
+
+  stateCaptionLine3 = new LabelWidget(15, yOff, lcd.width()-30, fonts[AKROBAT_BOLD_20]->height(), PARAMETERmessageLine3, WP_COLOR_0, GRAY_80, fonts[AKROBAT_BOLD_20], LabelWidget::CENTER);
+  yOff += stateCaptionLine3->height() + (spacing*2);
+
+  stateCaptionLine4 = new LabelWidget(15, yOff, lcd.width()-30, fonts[AKROBAT_BOLD_20]->height(), PARAMETERmessageLine4, WP_COLOR_0, GRAY_80, fonts[AKROBAT_BOLD_20], LabelWidget::CENTER);
+  yOff += stateCaptionLine4->height() + (spacing*2);
+
+}
+
+PopupApp::~PopupApp() {
+  log_d("destroy PopupApp");
+
+  delete stateCaptionLine1;
+  delete stateCaptionLine2;
+  delete stateCaptionLine3;
+  delete stateCaptionLine4;
+  delete nameCaption;
+  delete clearRect;
+  delete iconRect;
+  if(header) {
+    delete header;
+  }
+  if(footer) {
+    delete footer;
+  }
+}
+
+appEventResult PopupApp::processEvent(EventType event) {
+  log_d("processEvent PopupApp");
+  appEventResult res = DO_NOTHING;
+
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
+
+  if (event == WIPHONE_KEY_END) {
+    return EXIT_APP;
+  }
+  if (LOGIC_BUTTON_BACK(event)) {
+    return EXIT_APP;
+  } else if (LOGIC_BUTTON_OK(event)) {
+    return EXIT_APP;
+  }
+  if (event == WIPHONE_KEY_SELECT) {
+    return EXIT_APP;
+  }
+  return res;
+}
+
+void PopupApp::redrawScreen(bool redrawAll) {
+  log_d("redrawScreen PopupApp");
+
+  if (!screenInited || redrawAll) {
+    log_d("redraw all");
+    // Initialize screen
+    ((GUIWidget*) clearRect)->redraw(lcd);
+
+    ((GUIWidget*) iconRect)->redraw(lcd);
+    ((GUIWidget*) stateCaptionLine1)->redraw(lcd);
+    ((GUIWidget*) stateCaptionLine2)->redraw(lcd);
+    ((GUIWidget*) stateCaptionLine3)->redraw(lcd);
+    ((GUIWidget*) stateCaptionLine4)->redraw(lcd);
+    //((GUIWidget*) debugCaption_loudSpkr)->redraw(lcd);
+
+    ((GUIWidget*) nameCaption)->redraw(lcd);
+    //header->redraw(lcd);
+    //lcd.fillRect(95, 240, 50, 20, WP_ACCENT_1);     // DEBUG: very strange bug with white pixels over black border
+
+  } else {
+
+    // Refresh only updated labels
+    if (stateCaptionLine1->isUpdated()) {
+      log_d("stateCaption updated");
+      ((GUIWidget*) stateCaptionLine1)->redraw(lcd);     // TODO: either remove isUpdated, or replace with refresh
+      ((GUIWidget*) stateCaptionLine2)->redraw(lcd);     // TODO: either remove isUpdated, or replace with refresh
+      ((GUIWidget*) stateCaptionLine3)->redraw(lcd);     // TODO: either remove isUpdated, or replace with refresh
+      ((GUIWidget*) stateCaptionLine4)->redraw(lcd);     // TODO: either remove isUpdated, or replace with refresh
+    }
+    if (nameCaption->isUpdated()) {
+      log_d("nameCaption updated");
+      ((GUIWidget*) nameCaption)->redraw(lcd);
+    }
+  }
+  screenInited = true;
+}
+
+
+
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - -  Call app  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 CallApp::CallApp(Audio* audio, LCD& lcd, ControlState& state, bool isCaller, HeaderWidget* header, FooterWidget* footer)
   : WindowedApp(lcd, state, header, footer), FocusableApp(2), audio(audio),ini(Storage::ConfigsFile), caller(isCaller) {
   log_d("CallApp create");
+
+  int8_t earpieceVol, headphonesVol, loudspeakerVol;
+  //audio->getVolumes(earpieceVol, headphonesVol, loudspeakerVol);
+  if ((ini.load() ) && !ini.isEmpty()) {
+    if (ini.hasSection("audio")) {
+      log_d("getting audio info");
+      earpieceVol = ini["audio"].getIntValueSafe(earpieceVolField, earpieceVol);
+      headphonesVol = ini["audio"].getIntValueSafe(headphonesVolField, headphonesVol);
+      loudspeakerVol = ini["audio"].getIntValueSafe(loudspeakerVolField, loudspeakerVol);
+    }
+    //}
+    else {
+      log_e("configs file corrup or unknown format");
+      IF_LOG(VERBOSE)
+      ini.show();
+    }
+  }
+  ini.unload();
+  audio->setVolumes(earpieceVol, headphonesVol, loudspeakerVol);
+  audio->getVolumes(earpieceVol, headphonesVol, loudspeakerVol);
+  log_d("Volumes are earspkr %d headphone %d loudspkr %d", earpieceVol,headphonesVol,loudspeakerVol );
+
   const char* s;
 
   // Create and arrange widgets
-  header->setTitle(isCaller ? "Calling" : "Call");
-  footer->setButtons(isCaller ? "Loud Spkr" : "Accept", isCaller ? "Hang up" : "Reject");
+  header->setTitle(isCaller ? _("Calling") : _("Call"));
+  footer->setButtons(isCaller ? _("Loud Spkr") : _("Accept"), isCaller ? _("Hang up") : _("Reject"));
   clearRect = new RectWidget(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), WP_COLOR_1);
 
   // State caption in the middle
   const uint16_t spacing = 4;
   uint16_t yOff = header->height() + 26;
   stateCaption = new LabelWidget(0, yOff, lcd.width(), fonts[AKROBAT_BOLD_20]->height(),
-                                 isCaller ? "Making a call..." : "Inbound call...", isCaller ? WP_ACCENT_1 : WP_ACCENT_S, WP_COLOR_1, fonts[AKROBAT_BOLD_20], LabelWidget::CENTER);
+                                 isCaller ? _("Making a call...") : _("Inbound call..."), isCaller ? WP_ACCENT_1 : WP_ACCENT_S, WP_COLOR_1, fonts[AKROBAT_BOLD_20], LabelWidget::CENTER);
   yOff += stateCaption->height() + (spacing*2);
 
   log_i("CallApp LastReason icon_person_w");
@@ -4690,10 +5363,21 @@ CallApp::CallApp(Audio* audio, LCD& lcd, ControlState& state, bool isCaller, Hea
   yOff += uriCaption->height() + 20;
   s = controlState.lastReasonDyn != NULL ? (const char*) controlState.lastReasonDyn : "";
   debugCaption = new LabelWidget(0, yOff, lcd.width(), fonts[AKROBAT_BOLD_16]->height(), s, WP_DISAB_0, WP_COLOR_1, fonts[AKROBAT_BOLD_16], LabelWidget::CENTER);
-  
+
   reasonHash = hash_murmur(s);
-  log_i("hash_murmur");  
-  audio->chooseSpeaker(LOUDSPEAKER);
+  log_i("hash_murmur");
+  if(audio->getHeadphones() == false) {
+    if(!isCaller) {
+      log_d("receiving calla and enable the loudspeaker >>>>>>>>>>>>");
+      audio->chooseSpeaker(!EARSPEAKER);
+      loudSpkr = true;
+    } else {
+      log_d("making call and enable ear speaker >>>>>>>>>>>>>>>>>>>>");
+      audio->chooseSpeaker(EARSPEAKER);
+      loudSpkr = false;
+    }
+  }
+
 }
 
 CallApp::~CallApp() {
@@ -4709,6 +5393,10 @@ CallApp::~CallApp() {
 appEventResult CallApp::processEvent(EventType event) {
   log_d("processEvent CallApp");
   appEventResult res = DO_NOTHING;
+
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
+
   if (event == WIPHONE_KEY_END) {
     if(!controlState.sipRegistered) {
       log_i("processEvent EXIT_APP");
@@ -4733,13 +5421,13 @@ appEventResult CallApp::processEvent(EventType event) {
     }
     // Reject / Hang up
     if (controlState.sipState == CallState::BeingInvited) {
-      stateCaption->setText("Declining");
+      stateCaption->setText(_("Declining"));
       controlState.setSipState(CallState::Decline);
       res |= REDRAW_SCREEN;
     } else if (controlState.sipState != CallState::Idle && controlState.sipState != CallState::HangUp &&
                controlState.sipState != CallState::HangingUp && controlState.sipState != CallState::HungUp) {
-      stateCaption->setText("Hanging up");
-      footer->setButtons(NULL, "Hanging");
+      stateCaption->setText(_("Hanging up"));
+      footer->setButtons(NULL, _("Hanging"));
       controlState.setSipState(CallState::HangUp);
       res |= REDRAW_SCREEN;
     }
@@ -4748,14 +5436,25 @@ appEventResult CallApp::processEvent(EventType event) {
 
     // Accept call
     if (controlState.sipState == CallState::BeingInvited) {
-      stateCaption->setText("Accepting");
-      footer->setButtons("Loud Spkr", "Hang up");
+      stateCaption->setText(_("Accepting"));
+
+      footer->setButtons(_("Ear Spkr"), _("Hang up"));
       controlState.setSipState(CallState::Accept);
       res |= REDRAW_SCREEN | REDRAW_FOOTER;
-      audio->chooseSpeaker(EARSPEAKER);
+      audio->chooseSpeaker(!EARSPEAKER);
+      loudSpkr = true;
     }
 
   } else if (event == CALL_UPDATE_EVENT) {
+
+    if (controlState.sipState != CallState::BeingInvited) {
+      footer->setButtons(_("Loud Spkr"), _("Hang up"));
+      //this line may be added here by mistake while merging branches.
+      //controlState.setSipState(CallState::Accept);
+      res |= REDRAW_SCREEN | REDRAW_FOOTER;
+      audio->chooseSpeaker(EARSPEAKER);
+      loudSpkr = false;
+    }
 
     uint32_t hash;
 
@@ -4775,15 +5474,41 @@ appEventResult CallApp::processEvent(EventType event) {
       return EXIT_APP;
 
     } else if (controlState.sipState == CallState::Call) {
+      int8_t earpieceVol, headphonesVol, loudspeakerVol;
+      //audio->getVolumes(earpieceVol, headphonesVol, loudspeakerVol);
+      if ((ini.load() ) && !ini.isEmpty()) {
+        if (ini.hasSection("audio")) {
+          log_d("getting audio info");
+          earpieceVol = ini["audio"].getIntValueSafe(earpieceVolField, earpieceVol);
+          headphonesVol = ini["audio"].getIntValueSafe(headphonesVolField, headphonesVol);
+          loudspeakerVol = ini["audio"].getIntValueSafe(loudspeakerVolField, loudspeakerVol);
+        }
+        //}
+        else {
+          log_e("configs file corrup or unknown format");
+          IF_LOG(VERBOSE)
+          ini.show();
+        }
+      }
+      ini.unload();
+      audio->setVolumes(earpieceVol, headphonesVol, loudspeakerVol);
+      audio->getVolumes(earpieceVol, headphonesVol, loudspeakerVol);
+      log_d("Volumes are earspkr %d headphone %d loudspkr %d", earpieceVol,headphonesVol,loudspeakerVol );
 
       // Notify about start of the call
-      stateCaption->setText("Call in progress");
+      stateCaption->setText(_("Call in progress"));
       res |= REDRAW_SCREEN;
 
     } else if (controlState.sipState == CallState::HungUp) {
       log_i("Hung up");
       // Notify about termination of the call
-      stateCaption->setText("Hung up");
+      stateCaption->setText(_("Hung up"));
+      res |= REDRAW_SCREEN;
+
+    } else if (controlState.sipState == CallState::Busy) {
+      log_i("Busy");
+      // Notify about Busy of the call
+      stateCaption->setText(_("Busy"));
       res |= REDRAW_SCREEN;
 
     }
@@ -4798,11 +5523,11 @@ appEventResult CallApp::processEvent(EventType event) {
     //audio->getVolumes(earpieceVol, headphonesVol, loudspeakerVol);
     if ((ini.load() ) && !ini.isEmpty()) {
       if (ini.hasSection("audio")) {
-          log_d("getting audio info");
-          earpieceVol = ini["audio"].getIntValueSafe(earpieceVolField, earpieceVol);
-          headphonesVol = ini["audio"].getIntValueSafe(headphonesVolField, headphonesVol);
-          loudspeakerVol = ini["audio"].getIntValueSafe(loudspeakerVolField, loudspeakerVol);
-        }
+        log_d("getting audio info");
+        earpieceVol = ini["audio"].getIntValueSafe(earpieceVolField, earpieceVol);
+        headphonesVol = ini["audio"].getIntValueSafe(headphonesVolField, headphonesVol);
+        loudspeakerVol = ini["audio"].getIntValueSafe(loudspeakerVolField, loudspeakerVol);
+      }
       //}
       else {
         log_e("configs file corrup or unknown format");
@@ -4811,21 +5536,58 @@ appEventResult CallApp::processEvent(EventType event) {
       }
     }
     log_d("Volumes are earspkr %d headphone %d loudspkr %d", earpieceVol,headphonesVol,loudspeakerVol );
-    
-    int8_t d = event == WIPHONE_KEY_UP ? 6 : -6;
-    earpieceVol += d;
-    headphonesVol += d;
-    loudspeakerVol += d;
-    uint8_t precentage = 0x0;
-    uint8_t precentageLoud = 0x0;
+
+
+    if(loudSpkr == false || ((loudSpkr == false) && (audio->getHeadphones()) && (controlState.sipState == CallState::BeingInvited))) {
+      int8_t d = event == WIPHONE_KEY_UP ? 6 : -6;
+
+      if(audio->getHeadphones()) {
+        log_d("HeadPhone Level will be modified");
+        headphonesVol += d;
+
+        if (headphonesVol > 6 ) {
+          headphonesVol = 6;
+        }
+        if (headphonesVol < -54) {
+          headphonesVol = -54;
+        }
+      } else {
+        log_d("EarSpeaker Level will be modified");
+        earpieceVol += d;
+
+        if (earpieceVol > 6 ) {
+          earpieceVol = 6;
+        }
+        if (earpieceVol < -54) {
+          earpieceVol = -54;
+        }
+      }
+
+    } else if ((loudSpkr == true) || ((loudSpkr == false) && (controlState.sipState == CallState::BeingInvited))) {
+      int8_t d = event == WIPHONE_KEY_UP ? 2 : -2;
+      loudspeakerVol += d;
+      log_d("LoudSpeaker Level will be modified");
+
+      if (loudspeakerVol > 0 ) {
+        loudspeakerVol = 0;
+      }
+      if (loudspeakerVol < -20) {
+        loudspeakerVol = -20;
+      }
+    }
+
+
+    int precentageEar = 0x0;
+    int precentageLoud = 0x0;
+    int precentageHead = 0x0;
     //audio->setVolumes(earpieceVol, headphonesVol, loudspeakerVol);
     //audio->getVolumes(earpieceVol, headphonesVol, loudspeakerVol);
     char buff[50];
 
- 
-    if (!ini.hasSection("audio")) {
-        ini.addSection("audio");
-      }
+
+    if ((ini.load()) &&!ini.hasSection("audio")) {
+      ini.addSection("audio");
+    }
     ini["audio"][earpieceVolField] = earpieceVol;
     ini["audio"][headphonesVolField] = headphonesVol;
     ini["audio"][loudspeakerVolField] = loudspeakerVol;
@@ -4836,99 +5598,154 @@ appEventResult CallApp::processEvent(EventType event) {
     audio->setVolumes(earpieceVol, headphonesVol, loudspeakerVol);
     audio->getVolumes(earpieceVol, headphonesVol, loudspeakerVol);
     log_d("New Volumes are earspkr %d headphone %d loudspkr %d", earpieceVol,headphonesVol,loudspeakerVol );
-    
-    if (earpieceVol == -69){
-      precentage = 0x0;
-      precentageLoud = 0x0;
-    } 
-    if ((earpieceVol == -66) || (earpieceVol == -63) ) {
-      precentage = 0x04;
-      precentageLoud = 8;
-    } 
-    if ((earpieceVol == -60) || (earpieceVol == -57)) {
-      precentage = 12;
-      precentageLoud = 16;
-    } 
-    if ((earpieceVol == -54) || (earpieceVol == -51)) {
-      precentage = 20;
-      precentageLoud = 24;
-    } 
-    if ((earpieceVol == -48) || (earpieceVol == -45)) {
-      precentage = 28;
-      precentageLoud = 32;
-    } 
-    if ((earpieceVol == -42) || (earpieceVol == -39)) {
-      precentage = 36;
-      precentageLoud = 40;
-    } 
-    if ((earpieceVol == -36) || (earpieceVol == -33)) {
-      precentage = 44;
-      precentageLoud = 48;
-    } 
-    if ((earpieceVol == -30) || (earpieceVol == -27)) {
-      precentage = 52;
-      precentageLoud = 56;
-    } 
-    if ((earpieceVol == -24) || (earpieceVol == -21)) {
-      precentage = 60;
-      precentageLoud = 64;
-    } 
-    if ((earpieceVol == -18) || (earpieceVol == -15)) {
-      precentage = 68;
-      precentageLoud = 72;
-    } 
-    if ((earpieceVol == -12) || (earpieceVol == -9)) {
-      precentage = 76;
-      precentageLoud = 80;
-    } 
-    if ((earpieceVol == -6) || (earpieceVol == -3)) {
-      precentage = 84;
-      precentageLoud = 90;
-    } 
-    if ((earpieceVol == 0) || (earpieceVol == 3)) {
-      precentage = 92;
-      precentageLoud = 100;
-    } 
-    if (earpieceVol == 6) {
-      precentage = 100;
-      precentageLoud = 100;
+
+    precentageEar  = getPercentage(earpieceVol, false);
+    precentageLoud = getPercentage(loudspeakerVol, true);
+    precentageHead = getPercentage(headphonesVol, false);
+
+    if(loudSpkr == false) {
+
+      log_d("Speaker %d %%, Headphones %d %%", precentageEar, precentageHead);
+      //snprintf(buff, sizeof(buff), _("Speaker %d %%, Headphones %d %%"), precentageEar, precentageHead);
+      if (audio->getHeadphones()) {
+        snprintf(buff, sizeof(buff), _("    %d %%"), precentageHead);
+      } else {
+        snprintf(buff, sizeof(buff), _("    %d %%"), precentageEar);
+      }
+
+    } else if ((loudSpkr == true) || ((loudSpkr == false) && (controlState.sipState == CallState::BeingInvited))) {
+      log_d("Loudspeaker %d %%",  precentageLoud);
+      //snprintf(buff, sizeof(buff), _("    Loudspeaker %d %%"),  precentageLoud);
+      snprintf(buff, sizeof(buff), _("    %d %%"), precentageLoud);
     }
-    log_d("precentage is %d %%", precentage);
-    log_d("earpieceVol is %d %%", earpieceVol);
-    if(loudSpkr == false){
-      snprintf(buff, sizeof(buff), "Speaker %d %%, Headphones %d %%", precentage, precentage);
-    } else {
-      snprintf(buff, sizeof(buff), "    Loudspeaker %d %%",  precentageLoud);
-    }
-    
-    precentage = 0x0;
+
+    precentageEar = 0x0;
+    precentageHead = 0x0;
     precentageLoud = 0x0;
     debugCaption->setText(buff);
     //debugCaption_loudSpkr->setText(loudSpkrBuff);
 
     res |= REDRAW_SCREEN;
-  } 
-  
+  }
+
   if (event == WIPHONE_KEY_SELECT) {
-    if (controlState.sipState == CallState::Call) {
-      if (loudSpkr == false){
-        footer->setButtons("Ear Spkr", "Hang up");
+    int8_t earpieceVol, headphonesVol, loudspeakerVol;
+    if ((ini.load() ) && !ini.isEmpty()) {
+      if (ini.hasSection("audio")) {
+        log_d("getting audio info");
+        earpieceVol = ini["audio"].getIntValueSafe(earpieceVolField, earpieceVol);
+        headphonesVol = ini["audio"].getIntValueSafe(headphonesVolField, headphonesVol);
+        loudspeakerVol = ini["audio"].getIntValueSafe(loudspeakerVolField, loudspeakerVol);
+      }
+      //}
+      else {
+        log_e("configs file corrup or unknown format");
+        IF_LOG(VERBOSE)
+        ini.show();
+      }
+    }
+    log_d("Volumes are earspkr %d headphone %d loudspkr %d", earpieceVol,headphonesVol,loudspeakerVol );
+    ini.unload();
+    //audio->getVolumes(earpieceVol, headphonesVol, loudspeakerVol);
+    char buff[50];
+    int precentageEar = 0x0, precentageLoud = 0x0, precentageHead = 0x0;
+
+    precentageEar  = getPercentage(earpieceVol, false);
+    precentageLoud = getPercentage(loudspeakerVol, true);
+    precentageHead = getPercentage(headphonesVol, false);
+
+    if (controlState.sipState == CallState::Call || controlState.sipState == CallState::InvitedCallee ||
+        controlState.sipState == CallState::InvitingCallee) {
+      if (loudSpkr == false) {
+        footer->setButtons(_("Ear Spkr"), _("Hang up"));
+        debugCaption->setText("");
+        //snprintf(buff, sizeof(buff), "    Loudspeaker %d %%",  precentageLoud);
+        //snprintf(buff, sizeof(buff), _("    %d %%"), precentageLoud);
+        //debugCaption->setText(buff);
+
         res |= REDRAW_SCREEN | REDRAW_FOOTER;
         audio->chooseSpeaker(!EARSPEAKER);
         loudSpkr = true;
       } else {
-        footer->setButtons("Loud Spkr", "Hang up");
+        footer->setButtons(_("Loud Spkr"), _("Hang up"));
+
+        //snprintf(buff, sizeof(buff), " %d %%", precentageEar);
+        //snprintf(buff, sizeof(buff), _("    %d %%"), precentageEar);
+        //debugCaption->setText(buff);
+        debugCaption->setText("");
         res |= REDRAW_SCREEN | REDRAW_FOOTER;
         audio->chooseSpeaker(EARSPEAKER);
         loudSpkr = false;
       }
-      
+
+    } else if (controlState.sipState == CallState::BeingInvited) {
+      loudSpkr = false;
+
+      debugCaption->setText("");
+      //snprintf(buff, sizeof(buff), "    Loudspeaker %d %%",  precentageLoud);
+      //snprintf(buff, sizeof(buff), _("    %d %%"), precentageLoud);
+      //debugCaption->setText(buff);
+
+      res |= REDRAW_SCREEN | REDRAW_FOOTER;
+      audio->chooseSpeaker(!EARSPEAKER);
+      loudSpkr = true;
+
     }
   }
   log_d("res inisde processevent is %x", res);
   return res;
 }
-
+int CallApp::getPercentage(int value, bool loud) {
+  if (loud) {  // loudspkr
+    if ((value == -20) ) {
+      return 0;
+    } else if ((value == -18)) {
+      return 10;
+    } else if ((value == -16)) {
+      return 20;
+    } else if ((value == -14)) {
+      return 30;
+    } else if ((value == -12)) {
+      return 40;
+    } else if ((value == -10)) {
+      return 50;
+    } else if ((value == -8)) {
+      return 60;
+    } else if ((value == -6)) {
+      return 70;
+    } else if ((value == -4)) {
+      return 80;
+    } else if ((value == -2)) {
+      return 90;
+    } else if ((value == 0)) {
+      return 100;
+    }
+  } else {  //earspkr and headphone
+    if ((value == -54) ) {
+      return 0;
+    } else if ((value == -48)) {
+      return 10;
+    } else if ((value == -42)) {
+      return 20;
+    } else if ((value == -36)) {
+      return 30;
+    } else if ((value == -30)) {
+      return 40;
+    } else if ((value == -24)) {
+      return 50;
+    } else if ((value == -18)) {
+      return 60;
+    } else if ((value == -12)) {
+      return 70;
+    } else if ((value == -6)) {
+      return 80;
+    } else if ((value == 0)) {
+      return 90;
+    } else if ((value == 6)) {
+      return 100;
+    }
+  }
+}
 void CallApp::redrawScreen(bool redrawAll) {
   log_d("redrawScreen CallApp");
 
@@ -4941,7 +5758,7 @@ void CallApp::redrawScreen(bool redrawAll) {
     ((GUIWidget*) stateCaption)->redraw(lcd);
     //((GUIWidget*) debugCaption_loudSpkr)->redraw(lcd);
     ((GUIWidget*) debugCaption)->redraw(lcd);
-    
+
     ((GUIWidget*) nameCaption)->redraw(lcd);
     ((GUIWidget*) uriCaption)->redraw(lcd);
 
@@ -4965,7 +5782,7 @@ void CallApp::redrawScreen(bool redrawAll) {
     // if (debugCaption_loudSpkr->isUpdated()) {
     //   log_d("debugCaption_loudSpkr updated");
     //   ((GUIWidget*) debugCaption_loudSpkr)->redraw(lcd);
-      
+
     //   debugCaption_loudSpkr->setText("");
     //   ((GUIWidget*) debugCaption_loudSpkr)->redraw(lcd);
     // }
@@ -4981,12 +5798,9 @@ void CallApp::redrawScreen(bool redrawAll) {
   screenInited = true;
 }
 
-// - - - - - - - - - - - - - - - - - - - - - - - - - - - -  EditNetwork app  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-EditNetworkApp::EditNetworkApp(LCD& lcd, ControlState& state, const char* SSID, HeaderWidget* header, FooterWidget* footer)
-  : WindowedApp(lcd, state, header, footer), FocusableApp(5), ini(Networks::filename) {
-  log_d("EditNetworkApp");
-
+// ----------------------------- wifi utility functions ------------------------------------------------
+void loadWiFiSettings(CriticalFile& ini) {
   if (ini.load() || ini.restore()) {
     if (ini.isEmpty() || !ini[0].hasKey("v") || strcmp(ini[0]["v"], "1")) {
       log_d("unknown version or corrupt \"%s\" file", ini.filename());
@@ -4995,8 +5809,242 @@ EditNetworkApp::EditNetworkApp(LCD& lcd, ControlState& state, const char* SSID, 
     ini[0]["desc"] = "WiPhone WiFi networks";
     ini[0]["v"] = "1";
   }
+  if(ini.hasSection("wifi") && ini["wifi"].hasKey("wifionoff")) {
+    wifiOn = (strncmp(ini["wifi"]["wifionoff"], "on", 2) == 0);
+  } else {
+    wifiOn = true;  //TODO: what is the default state?
+  }
+
+  if(!wifiOn) {
+    esp_err_t err = esp_wifi_stop();
+    if(err != ESP_OK) {
+      log_e("WIFI can't be stopped");
+    } else {
+      log_d("WIFI will be stopped");
+      wifiState.disable();
+    }
+  }
+
   IF_LOG(VERBOSE)
   ini.show();
+}
+
+bool connectToSsid(char* ssid, CriticalFile& ini) {
+  if(!ssid) {
+    return false;
+  }
+  if (wifiState.connectTo(ssid)) {
+    log_d("connecting: %s", ssid);
+
+    log_d("waiting for connectionEvent");
+    for (uint8_t j=0; j<WIFI_CONNECTION_TIMEOUT_X100MS && !wifiState.isConnectionEvent(); j++) {
+      delay(100);
+    }
+
+    if (wifiState.isConnectionEvent()) {
+      log_d("connection event happened");
+
+      if(!wifiState.isConnected()) {
+        gui.showPopup(WIFI_ERROR_POPUP_HEADER,
+                      WIFI_ERR_POPUP_4_1ST_LINE,
+                      WIFI_ERR_POPUP_4_2ND_LINE,
+                      WIFI_ERR_POPUP_4_3RD_LINE,
+                      WIFI_ERR_POPUP_4_4RD_LINE, "", "OK", (unsigned char*)icon_phone_small_w_crossed, sizeof(icon_phone_small_w_crossed));
+        return false;
+      }
+      delay(100);
+      //quit = true;
+
+      int i = ini.query("s", backupConnectedSsid);                   // "s" for "SSID"
+      if (i >= 0 && ini.setUniqueFlag(i, "m") && ini.store()) {       // "m" for "main" (preferred network)
+        log_d("set as preferred network");
+      }
+
+      return true;
+    } else {
+      log_d("connection timeout");
+      gui.showPopup(WIFI_ERROR_POPUP_HEADER,
+                    WIFI_ERR_POPUP_5_1ST_LINE,
+                    WIFI_ERR_POPUP_5_2ND_LINE,
+                    WIFI_ERR_POPUP_5_3RD_LINE,
+                    WIFI_ERR_POPUP_5_4RD_LINE, "", "OK", (unsigned char*)icon_phone_small_w_crossed, sizeof(icon_phone_small_w_crossed));
+      return false;
+    }
+  } else {
+    log_d("could not connect: %s", backupConnectedSsid);
+
+    gui.showPopup(WIFI_ERROR_POPUP_HEADER,
+                  WIFI_ERR_POPUP_6_1ST_LINE,
+                  WIFI_ERR_POPUP_6_2ND_LINE,
+                  WIFI_ERR_POPUP_6_3RD_LINE,
+                  WIFI_ERR_POPUP_6_4RD_LINE, "", "OK", (unsigned char*)icon_phone_small_w_crossed, sizeof(icon_phone_small_w_crossed));
+    return false;
+  }
+}
+
+void saveWiFiIni(const char* ssid, const char* passwd, CriticalFile& ini, bool& shouldRecheckKnownness) {
+
+  // Save new WiFi credentials to NVS
+  log_d("save button pressed");
+
+  if(passwd != NULL && passwd[0] != 0) {
+    // Reflect changes to NanoINI
+    int index = ini.query("s", ssid);       // "s" key stands for "SSID"
+    if (index >= 0) {
+      ini[index]["p"] = passwd;               // update password for a known network ("p" key")
+    } else {
+      int i = ini.addSection();
+      ini[i]["s"] = ssid;
+      ini[i]["p"] = passwd;
+      // TODO: maybe we don't always want to set the network as preferred?
+      ini.setUniqueFlag(i, "m");                            // "m" (for "main") is the preferred network flag
+    }
+
+    // Save to file, reload current network
+    {
+      ini.store();
+      log_d("saved network");
+
+      /*log_d("disconnecting");
+      wifiState.disconnect();
+      // Update the WiFi credentials from NVS
+      // TODO: clean it up
+      */
+      wifiState.loadPreferred();
+      wifiState.loadNetworkSettings(ssid);
+    }
+    //knownNetwork = true;
+    shouldRecheckKnownness = true;
+  }
+}
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - -  WiFiState app  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+WiFiSettingsApp::WiFiSettingsApp(LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget* footer)
+  : WindowedApp(lcd, state, header, footer), FocusableApp(5), ini(Networks::filename) {
+  log_d("WiFiStateApp");
+
+  loadWiFiSettings(ini); //this also sets the wifiOn global variable
+
+  // Create and arrange general widgets
+  header->setTitle(_("WiFi settings"));
+  footer->setButtons(_("Select"), _("Back"));
+
+  clearRect = new RectWidget(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), WP_COLOR_1);
+
+  uint16_t yOff = header->height() + 5;
+
+  onOffLabel = new LabelWidget(0, yOff, lcd.width()/3, 25, _("State:"), WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
+
+  wifiOnOff = new ChoiceWidget(lcd.width()*2.0/3, yOff, lcd.width()/3, 35);
+  wifiOnOff->addChoice(_("On"));
+  wifiOnOff->addChoice(_("Off"));
+  if(wifiOn) {
+    wifiOnOff->setValue(0);
+  } else {
+    wifiOnOff->setValue(1);
+  }
+
+  addFocusableWidget(wifiOnOff);
+  setFocus(wifiOnOff);
+
+  screenInited = false;
+}
+
+
+WiFiSettingsApp::~WiFiSettingsApp() {
+  log_d("destroy WiFiSettingsApp");
+  ini.backup();
+  delete clearRect;
+  delete onOffLabel;
+  if(wifiOnOff) {
+    delete wifiOnOff;
+  }
+}
+
+appEventResult WiFiSettingsApp::processEvent(EventType event) {
+  log_d("processEvent EditNetworkApp");
+
+  bool quit = false;
+
+  FocusableWidget* focusedWidget = getFocused();
+
+  if (event == WIPHONE_KEY_DOWN || event == WIPHONE_KEY_UP) {
+    // Change focus
+    nextFocus(event == WIPHONE_KEY_DOWN);
+  } else if (event == WIPHONE_KEY_END || event == WIPHONE_KEY_BACK) {
+    quit = true;
+  } else if (LOGIC_BUTTON_OK(event) || event==WIPHONE_KEY_SELECT) {
+    log_d("wifiOnOff: %d", wifiOnOff->getValue());
+    esp_err_t err;
+    switch (wifiOnOff->getValue()) {
+    case 0: // wifi ON
+      wifiOn = true;
+      ini["wifi"]["wifionoff"] = "on";
+      ini.store();
+      err = esp_wifi_start();
+      if(err != ESP_OK) {
+        log_e("WIFI can't be started");
+      } else {
+        log_d("WIFI will Start");
+
+        if(backupWiFiConnected) {
+          connectToSsid(backupConnectedSsid, ini);
+        }
+        quit = true;
+      }
+      break;
+    case 1: // wifi OFF
+      wifiOn = false;
+      ini["wifi"]["wifionoff"] = "off";
+      ini.store();
+      err = esp_wifi_stop();
+      if(err != ESP_OK) {
+        log_e("WIFI cann't be stopped");
+      } else {
+        log_d("WIFI will be stopped");
+        log_d("disconnecting");
+        wifiState.disable();
+        quit = true;
+      }
+      break;
+    default:
+      log_e("Unknown On-Off selection: %d", wifiOnOff->getValue());
+    }
+  } else {
+    // Pass button to whatever is focused
+    if (focusedWidget != NULL) {
+      focusedWidget->processEvent(event);
+    }
+  }
+
+  return quit ? EXIT_APP : REDRAW_ALL | REDRAW_HEADER/*animate/blink charge icon*/;
+}
+
+void WiFiSettingsApp::redrawScreen(bool redrawAll) {
+  log_d("redrawScreen WiFiSettingsApp");
+
+  static bool oldWiFiOn = wifiOn;
+
+  if (!screenInited || redrawAll) {
+    ((GUIWidget*) clearRect)->redraw(lcd);
+    screenInited = true;
+  }
+
+  ((GUIWidget*) onOffLabel)->redraw(lcd);
+  ((GUIWidget*) wifiOnOff)->redraw(lcd);
+}
+
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - -  EditNetwork app  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+#define BUTTON_PADDING_W 16
+
+EditNetworkApp::EditNetworkApp(LCD& lcd, ControlState& state, const char* SSID, HeaderWidget* header, FooterWidget* footer)
+  : WindowedApp(lcd, state, header, footer), FocusableApp(5), ini(Networks::filename) {
+  log_d("EditNetworkApp");
+
+  loadWiFiSettings(ini);//this also sets the wifiOn global variable
 
   // if SSID is NULL - it is run as a standalone app (if yes - edit the current network)
   standAloneApp = false;
@@ -5012,69 +6060,65 @@ EditNetworkApp::EditNetworkApp(LCD& lcd, ControlState& state, const char* SSID, 
 
   // Is this network connected?
   connectedNetwork = false;
-  if ( SSID != NULL && (SSID == wifiState.ssid() || (wifiState.ssid()!=NULL && !strcmp(wifiState.ssid(), SSID)) ) ) {       // network name coincides
+  if ( SSID != NULL && wifiState.ssid()!=NULL && !strcmp(wifiState.ssid(), SSID) ) {       // network name coincides
     if (wifiState.isConnected()) {
       log_d("network is connected");
       connectedNetwork = true;
     }
   }
 
+  //if ( SSID != NULL && (SSID == wifiState.ssid() || (wifiState.ssid()!=NULL && !strcmp(wifiState.ssid(), SSID)) ) ) {       // network name coincides
+  // If the edit network page is opened under scan wifi networks page, the wifi may be disconnected but it should be connected,
+  //   so, we should backup the connection state.
+  //if(backupWiFiConnected) {
+  //  connectedNetwork = true;
+  //}
+
   // Is this network in list of known networks?
   knownNetwork = ini.query("s", SSID) >= 0;         // find a section with field "s" (SSID) equal to the current network SSID
 
   // Create and arrange general widgets
-  header->setTitle("Edit Network");
-  footer->setButtons("Connect", "Clear");
+  header->setTitle(_("Edit Network"));
+  if (wifiOn) {
+    if (connectedNetwork) {
+      footer->setButtons(_("Disconnect"), _("Clear"));
+    } else {
+      footer->setButtons(_("Connect"), _("Clear"));
+    }
+  } else {
+    footer->setButtons("", _("Clear"));
+  }
 
   clearRect = new RectWidget(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), WP_COLOR_1);
 
   uint16_t yOff = header->height() + 5;
 
   // Add form
-  this->addLabelInput(yOff, ssidLabel, ssidInput, "SSID:", 50);
-  this->addLabelInput(yOff, passLabel, passInput, "Password:", 100);
+  this->addLabelInput(yOff, ssidLabel, ssidInput, _("SSID:"), 50);
+  this->addLabelInput(yOff, passLabel, passInput, _("Password:"), 100);
 
   const uint16_t spacing = 6; // 4
   const uint16_t xOff = 2;
   yOff += spacing*2;
   lcd.setTextFont(fonts[OPENSANS_COND_BOLD_20]);
-  uint16_t buttonSize1 = lcd.textWidth("Forget") + BUTTON_PADDING;
-  uint16_t buttonSize2 = lcd.textWidth("Disconnect ") + BUTTON_PADDING;
-  saveButton = new ButtonWidget(xOff, yOff, "Save");
+  //uint16_t buttonSize2 = lcd.textWidth(_("Disconnect")) + BUTTON_PADDING;
 
   forgetButton = NULL;
-  connectionButton = NULL;
-  wifiOnOff = NULL;
+
+  yOff += spacing;
+  connectionButton = new ButtonWidget(xOff, yOff, connectedNetwork ? _("Disconnect") : _("Connect"), ButtonWidget::textWidth(_("Disconnect"))+BUTTON_PADDING_W);
+  yOff += connectionButton->height() + spacing;
+
+  connectionButton->setWidth(lcd.textWidth(connectedNetwork ? _("Disconnect") : _("Connect")) + BUTTON_PADDING_W);
+
   if (knownNetwork) {
-    forgetButton = new ButtonWidget(xOff + saveButton->width() + 2*spacing, yOff, "Forget");
-
-    yOff += saveButton->height() + spacing*2;
-    connectionButton = new ButtonWidget(xOff, yOff, connectedNetwork ? "Disconnect" : "Connect", ButtonWidget::textWidth("Connecting")+18);
-
-    wifiOnOff = new ChoiceWidget(0, yOff+connectionButton->height(), lcd.width(), 35);
-    wifiOnOff->addChoice("WIFI-ON");
-    wifiOnOff->addChoice("WIFI-OFF");
-    if(wifiOn){
-      wifiOnOff->setValue(0);
+    if (wifiOn) {
+      forgetButton = new ButtonWidget(xOff, yOff, _("Forget"));
+      yOff += forgetButton->height() + spacing;
     } else {
-      wifiOnOff->setValue(1);
     }
-
-    yOff += wifiOnOff->height();
-  
   } else {
-    
-    wifiOnOff = new ChoiceWidget(0, yOff+saveButton->height(), lcd.width(), 35);
-    wifiOnOff->addChoice("WIFI-ON");
-    wifiOnOff->addChoice("WIFI-OFF");
-    if(wifiOn){
-      wifiOnOff->setValue(0);
-    } else {
-      wifiOnOff->setValue(1);
-    }
-
-    yOff += wifiOnOff->height();
-  
+    footer->setButtons(_("Connect"), _("Clear"));
   }
 
   // Load password / populate text
@@ -5089,23 +6133,25 @@ EditNetworkApp::EditNetworkApp(LCD& lcd, ControlState& state, const char* SSID, 
     passInput->setText("");
   }
 
-  // Focusables
-  addFocusableWidget(ssidInput);
-  addFocusableWidget(passInput);
-  addFocusableWidget(saveButton);
-  if (forgetButton != NULL) {
-    addFocusableWidget(forgetButton);
+  if (wifiOn) {
+    addFocusableWidget(ssidInput);
+    addFocusableWidget(passInput);
+    if (connectionButton != NULL) {
+      addFocusableWidget(connectionButton);
+    }
+    if (forgetButton != NULL) {
+      addFocusableWidget(forgetButton);
+    }
   }
-  if (connectionButton != NULL) {
-    addFocusableWidget(connectionButton);
+
+  if (wifiOn) {
+    setFocus(ssidInput);
+  } else {
   }
-  if (wifiOnOff != NULL) {
-    addFocusableWidget(wifiOnOff);
-  }
-  
-  setFocus(ssidInput);
   screenInited = false;
+  forceRedrawFooter = true;
 }
+
 
 EditNetworkApp::~EditNetworkApp() {
   log_d("destroy EditNetworkApp");
@@ -5113,15 +6159,18 @@ EditNetworkApp::~EditNetworkApp() {
   ini.backup();
 
   delete clearRect;
-  delete ssidLabel;
-  delete ssidInput;
-  delete passLabel;
-  delete passInput;
-  delete saveButton;
-  if(wifiOnOff){
-    delete wifiOnOff;
+  if(wifiOn) {
+    delete ssidLabel;
+    delete ssidInput;
+    delete passLabel;
+    delete passInput;
   }
-  
+  if(forgetButton) {
+    freeNull((void**)&forgetButton);
+  }
+  if(connectionButton) {
+    freeNull((void**)&connectionButton);
+  }
 }
 
 appEventResult EditNetworkApp::processEvent(EventType event) {
@@ -5132,52 +6181,12 @@ appEventResult EditNetworkApp::processEvent(EventType event) {
   FocusableWidget* focusedWidget = getFocused();
 
   if (event == WIPHONE_KEY_DOWN || event == WIPHONE_KEY_UP) {
-
     // Change focus
     nextFocus(event == WIPHONE_KEY_DOWN);
-
+    forceRedrawFooter = true;//redraw footer with respect to that connect/disconnect or forget is focused or not.
   } else if (event == WIPHONE_KEY_END) {
-
     quit = true;
-
-  } else if (LOGIC_BUTTON_OK(event) && focusedWidget == saveButton) {
-
-    // If "OK" was pressed while one of saveButton selected
-
-    // Save new WiFi credentials to NVS
-    log_d("save button pressed");
-
-    // Reflect changes to NanoINI
-    int index = ini.query("s", ssidInput->getText());       // "s" key stands for "SSID"
-    if (index >= 0) {
-      ini[index]["p"] = passInput->getText();               // update password for a known network ("p" key")
-    } else {
-      int i = ini.addSection();
-      ini[i]["s"] = ssidInput->getText();
-      ini[i]["p"] = passInput->getText();
-      // TODO: maybe we don't always want to set the network as preferred?
-      ini.setUniqueFlag(i, "m");                            // "m" (for "main") is the preferred network flag
-    }
-
-    // Save to file, reload current network
-    {
-      ini.store();
-      log_d("saved network");
-
-      log_d("disconnecting");
-      wifiState.disconnect();
-
-      // Update the WiFi credentials from NVS
-      // TODO: clean it up
-      wifiState.loadPreferred();
-      wifiState.loadNetworkSettings(ssidInput->getText());
-
-      // Quit from the app
-      quit = true;
-    }
-
-  } else if (LOGIC_BUTTON_OK(event) && forgetButton!=NULL && focusedWidget == forgetButton) {
-
+  } else if ((event==WIPHONE_KEY_OK || event==WIPHONE_KEY_SELECT) && forgetButton!=NULL && focusedWidget == forgetButton) {
     log_d("forget button pressed");
     int i = ini.query("s", ssidInput->getText());     // TODO: consider that there might be multiple networks with this name
     if (i>=0) {
@@ -5189,9 +6198,17 @@ appEventResult EditNetworkApp::processEvent(EventType event) {
       if (!removed) {
         log_d("COULD NOT BE REMOVED: %s", ssidInput->getText());
       }
-      quit = true;
+      //ssidInput->setText("");
+      //passInput->setText("");
+      footer->setButtons(_("Save"), _("Clear"));
+      //quit = true;
     }
-    wifiState.disable();
+    wifiState.disconnect();
+    backupWiFiConnected = false;
+    freeNull((void**)&backupConnectedSsid);
+    connectedNetwork = false;
+    //knownNetwork = false;
+    shouldRecheckKnownness = true;
 
   } else if (event==WIPHONE_KEY_CALL || event==WIPHONE_KEY_SELECT || (LOGIC_BUTTON_OK(event) && connectionButton!=NULL && focusedWidget == connectionButton) ) {
 
@@ -5199,31 +6216,44 @@ appEventResult EditNetworkApp::processEvent(EventType event) {
 
     // TODO: move actual connecting / unconnecting to the main cycle?
     // TODO: after the credentials have changed, disable "Connect" button
+    if (wifiOn) {
+      log_d("connection button pressed");
+      if (wifiState.isConnected()) {
+        log_d("disconnecting");
+        /*popupApp = new PopupApp(this->lcd, this->controlState, this->header, this->footer, "WiFi Disconnecting", "Edit Network",
+                                    "Disconnecting",
+                                    "",
+                                    "", "", "OK", icon_phone_small_w_crossed, sizeof(icon_phone_small_w_crossed));*/
 
-    log_d("connection button pressed");
-    if (connectedNetwork) {
-      log_d("disconnecting");
-      //wifiState.disconnect();
-      wifiState.disable();
-      quit = true;
+        //wifiState.disconnect();
+        wifiState.disable();
+        //quit = true;
 
-      int index = ini.query("s", ssidInput->getText());       // "s" key stands for "SSID"
-      if (index >= 0) {
-        ini[index]["disabled"] = "true";
-        ini.store();
-      } 
-    } else {
-      if (wifiState.connectTo(ssidInput->getText())) {
+        backupWiFiConnected = false;
+        freeNull((void**)&backupConnectedSsid);
+
+        int index = ini.query("s", ssidInput->getText());       // "s" key stands for "SSID"
+        if (index >= 0) {
+          ini[index]["disabled"] = "true";
+          ini.store();
+        }
+      } else {
+        //initially set to not connected, it will change if connected successfully.
+        backupWiFiConnected = false;
+        freeNull((void**)&backupConnectedSsid);
+
+        connectToWiFi(strdup(ssidInput->getText()), strdup(passInput->getText()));//fixme think about freeing.  mem leak
         log_d("connecting: %s", ssidInput->getText());
 
         int index = ini.query("s", ssidInput->getText());       // "s" key stands for "SSID"
         if (index >= 0) {
           ini[index]["disabled"] = "false";
           ini.store();
-        } 
+        }
 
         // Change button appearance
         connectionButton->setText("Connecting");
+        connectionButton->setWidth(lcd.textWidth(_("Connecting")) + BUTTON_PADDING_W);
         //((GUIWidget*) connectionButton)->redraw(lcd);         // TODO: works, but doesn't separate event processing from redrawing well (move connecting logic elsewhere)
 
         int i = ini.query("s", ssidInput->getText());                   // "s" for "SSID"
@@ -5234,130 +6264,225 @@ appEventResult EditNetworkApp::processEvent(EventType event) {
         // Wait for result
         // TODO: move actual connecting elsewhere
         log_d("waiting for connectionEvent");
-        for (uint8_t j=0; j<50 && !wifiState.isConnectionEvent(); j++) {
+        for (uint8_t j=0; j<WIFI_CONNECTION_TIMEOUT_X100MS && !wifiState.isConnectionEvent(); j++) {
           delay(100);
         }
 
         // Quit or stay
         if (wifiState.isConnectionEvent()) {
           log_d("connection event happened");
+
+          if(!wifiState.isConnected()) {
+            gui.showPopup(WIFI_ERROR_POPUP_HEADER,
+                          WIFI_ERR_POPUP_1_1ST_LINE,
+                          WIFI_ERR_POPUP_1_2ND_LINE,
+                          WIFI_ERR_POPUP_1_3RD_LINE,
+                          WIFI_ERR_POPUP_1_4RD_LINE, "", "OK", (unsigned char*)icon_phone_small_w_crossed, sizeof(icon_phone_small_w_crossed));
+            if(connectionButton) {
+              connectionButton->setText(_("Connect"));
+              connectionButton->setWidth(lcd.textWidth(_("Connect")) + BUTTON_PADDING_W);
+            }
+          } else {
+            //footer->setButtons(_("Disconnect"), _("Clear"));
+            //connectionButton->setText(_("Disconnect"));
+            //connectionButton->setWidth(lcd.textWidth(_("Disconnect")) + BUTTON_PADDING_W);
+            connectedNetwork = true;
+            //quit = true;
+
+            saveWiFiIni(ssidInput->getText(), passInput->getText(), ini, shouldRecheckKnownness);
+
+            //these global variables are for scan timer event
+            backupWiFiConnected = wifiState.isConnected();
+            backupConnectedSsid = wifiState.ssid() ? strdup(wifiState.ssid()) : nullptr;
+          }
+
           delay(100);
-          quit = true;
+          //quit = true;
         } else {
           log_d("connection timeout");
 
+          gui.showPopup(WIFI_ERROR_POPUP_HEADER,
+                        WIFI_ERR_POPUP_2_1ST_LINE,
+                        WIFI_ERR_POPUP_2_2ND_LINE,
+                        WIFI_ERR_POPUP_2_3RD_LINE,
+                        WIFI_ERR_POPUP_2_4RD_LINE, "", "OK", (unsigned char*)icon_phone_small_w_crossed, sizeof(icon_phone_small_w_crossed));
+
+          backupWiFiConnected = false;
+          freeNull((void**)&backupConnectedSsid);
+
           // Restore button appearance
-          connectionButton->setText("Connect");
+          if(connectionButton) {
+            connectionButton->setText(_("Connect"));
+            connectionButton->setWidth(lcd.textWidth(_("Connect")) + BUTTON_PADDING_W);
+          }
           //((GUIWidget*) connectionButton)->redraw(lcd);       // Works, but doesn't separate event processing from redrawing well
         }
-
-      } else {
-        log_d("could not connect: %s", ssidInput->getText());
       }
+    } else {
+      quit = true;
     }
-
+  } else if(event == WIPHONE_KEY_BACK && (forgetButton != NULL && getFocused() == forgetButton || connectionButton != NULL && getFocused() == connectionButton)) {
+    quit = true;
   } else {
 
     // Pass button to whatever is focused
 
     if (focusedWidget != NULL) {
       focusedWidget->processEvent(event);
+
+      //probably ssid or password are edited. so set knownnetwork to false so that user has to save it again.
+      shouldRecheckKnownness = true;
     }
 
   }
 
-  
-  if (wifiOnOff != NULL) {
-      log_e("wifiOnOff: %d", wifiOnOff->getValue());
-      esp_err_t err;
-      switch (wifiOnOff->getValue()) {
-      case 0: // wifi ON
-        wifiOn = true;
-        err = esp_wifi_start();
-        if(err != ESP_OK) {
-          log_e("WIFI cann't be started");
-        } else {
-          log_d("WIFI will Start");
-          
-          connectedNetwork = false;
-          
-          if(ssidInput->getText() != NULL){
-            if (wifiState.connectTo(ssidInput->getText())) {
-              log_d("connecting: %s", ssidInput->getText());
-
-              int i = ini.query("s", ssidInput->getText());                   // "s" for "SSID"
-              if (i >= 0 && ini.setUniqueFlag(i, "m") && ini.store()) {       // "m" for "main" (preferred network)
-                log_d("set as preferred network");
-              }
-
-              log_d("waiting for connectionEvent");
-              for (uint8_t j=0; j<50 && !wifiState.isConnectionEvent(); j++) {
-                delay(100);
-              }
-
-              if (wifiState.isConnectionEvent()) {
-                log_d("connection event happened");
-                delay(100);
-                connectionButton->setText("Disconnect");
-              } else {
-                log_d("connection timeout");
-              }
-
-            } else {
-              log_d("could not connect: %s", ssidInput->getText());
-            }
-          }
-        }
-        break;
-      case 1: // wifi OFF
-        wifiOn = false;
-        err = esp_wifi_stop();
-        if(err != ESP_OK) {
-          log_e("WIFI cann't be stopped");
-        } else {
-          log_d("WIFI will be stopped");
-          connectedNetwork = true;
-          if (connectedNetwork) {
-          log_d("disconnecting");
-          
-          wifiState.disable();
-          }
-    
-        }
-        break;
-      default:
-        log_e("Unknown UDP-SIP - TCP-SIP selection: %d", wifiOnOff->getValue());
-        
-      }
-    }
-
-  
-  
-
-  return quit ? EXIT_APP : REDRAW_ALL;
+  return quit ? EXIT_APP : REDRAW_ALL | REDRAW_HEADER/*animate/blink charge icon*/;
 }
 
 void EditNetworkApp::redrawScreen(bool redrawAll) {
   log_d("redrawScreen EditNetworkApp");
 
+  static bool oldWiFiOn = wifiOn;
+
+  if (wifiOn) {
+    static bool oldKnownNetwork = knownNetwork;
+    static bool oldConnectedToThisSSID = connectedToThisSSID;
+
+    // Is this network connected?
+    const char* SSID = ssidInput->getText();
+    connectedToThisSSID = false;
+    if ( SSID != NULL && wifiState.ssid()!=NULL && !strcmp(wifiState.ssid(), SSID) ) {       // network name coincides
+      if (wifiState.isConnected()) {
+        connectedToThisSSID = true;
+      }
+    }
+
+    log_d("SSID: %s wifiState.ssid(): %s connectedToThisSSID: %d\n", SSID,
+          (wifiState.ssid() != NULL ? wifiState.ssid() : "null"), connectedToThisSSID);
+
+    if(shouldRecheckKnownness) {
+      const char* passwd = passInput->getText();
+      if(SSID == NULL || SSID[0] == 0) {
+        knownNetwork = false;
+      } else {
+        knownNetwork = ini.query("s", SSID, "p", passwd) >= 0;
+      }
+      shouldRecheckKnownness = false;
+    }
+
+    if(oldWiFiOn != wifiOn || oldKnownNetwork != knownNetwork || oldConnectedToThisSSID != connectedToThisSSID || forceRedrawFooter) {
+
+      lcd.setTextFont(fonts[OPENSANS_COND_BOLD_20]);
+
+      if(!forceRedrawFooter) {
+        uint16_t yOff = header->height() + 5;
+
+        yOff += 120;
+
+        const uint16_t spacing = 6;
+        const uint16_t xOff = 2;
+        yOff += (spacing*4 + connectionButton->height());
+
+        if(knownNetwork) {
+          if(!forgetButton) {
+            forgetButton = new ButtonWidget(xOff, yOff, "Forget");
+            yOff += forgetButton->height() + spacing*2;
+          }
+          /*if (connectedToThisSSID == false) {
+            connectionButton->setText(_("Connect"));
+          } else {
+            connectionButton->setText(_("Disconnect"));
+          }*/
+        } else {
+          setFocus(ssidInput);
+          //freeNull((void**)&connectionButton);
+          freeNull((void**)&forgetButton);
+          redrawAll = true;
+        }
+      }
+
+      if(knownNetwork) {
+        if (wifiOn) {
+          if (connectedToThisSSID) {
+            footer->setButtons(_("Disconnect"), _("Clear"));
+            connectionButton->setText(_("Disconnect"));
+            connectionButton->setWidth(lcd.textWidth(_("Disconnect")) + BUTTON_PADDING_W);
+          } else {
+            footer->setButtons(_("Connect"), _("Clear"));
+            connectionButton->setText(_("Connect"));
+            connectionButton->setWidth(lcd.textWidth(_("Connect")) + BUTTON_PADDING_W);
+          }
+
+          //change the footer texts as "ok" and "back" if connect/disconnect or forget buttons are focused.
+          if(forgetButton != NULL && getFocused() == forgetButton || connectionButton != NULL && getFocused() == connectionButton) {
+            footer->setButtons(_("OK"), _("Back"));
+          }
+
+        } else {
+        }
+      } else {
+        footer->setButtons("Connect", _("Clear"));
+        connectionButton->setText(_("Connect"));
+        connectionButton->setWidth(lcd.textWidth(_("Connect")) + BUTTON_PADDING_W);
+
+        //change the footer texts as "ok" and "back" if connect/disconnect or forget buttons are focused.
+        if(forgetButton != NULL && getFocused() == forgetButton || connectionButton != NULL && getFocused() == connectionButton) {
+          footer->setButtons(_("OK"), _("Back"));
+        }
+      }
+
+      if(!forceRedrawFooter) {
+        redrawAll = true;
+
+        clearFocusables();
+
+        addFocusableWidget(ssidInput);
+        addFocusableWidget(passInput);
+        if(connectionButton) {
+          addFocusableWidget(connectionButton);
+        }
+        if(forgetButton) {
+          addFocusableWidget(forgetButton);
+        }
+      }
+
+      forceRedrawFooter = false;
+    }
+    oldKnownNetwork = knownNetwork;
+    oldConnectedToThisSSID = connectedToThisSSID;
+  } else {
+    if(oldWiFiOn != wifiOn) {
+      freeNull((void**)&forgetButton);
+
+      clearFocusables();
+      addFocusableWidget(ssidInput);
+      addFocusableWidget(passInput);
+
+      redrawAll = true;
+    }
+  }
+
+  oldWiFiOn = wifiOn;
+
   if (!screenInited || redrawAll) {
     ((GUIWidget*) clearRect)->redraw(lcd);
+  }
+
+  if (wifiOn) {
     ((GUIWidget*) ssidLabel)->redraw(lcd);
     ((GUIWidget*) passLabel)->redraw(lcd);
+    //EditNetworkApp(lcd, controlState, ssidInput->getText(), header, footer);    // TRICKY: skipping RSSI prefix
+    ((GUIWidget*) ssidInput)->redraw(lcd);
+    ((GUIWidget*) passInput)->redraw(lcd);
   }
-  ((GUIWidget*) ssidInput)->redraw(lcd);
-  ((GUIWidget*) passInput)->redraw(lcd);
-  ((GUIWidget*) saveButton)->redraw(lcd);
-  if (forgetButton != NULL) {
-    ((GUIWidget*) forgetButton)->redraw(lcd);
-  }
+
   if (connectionButton != NULL) {
     ((GUIWidget*) connectionButton)->redraw(lcd);
   }
-  if (wifiOnOff != NULL) {
-    ((GUIWidget*) wifiOnOff)->redraw(lcd);
+  if (forgetButton != NULL) {
+    ((GUIWidget*) forgetButton)->redraw(lcd);
   }
-  
+
   screenInited = true;
 }
 
@@ -5385,15 +6510,15 @@ TimeConfigApp::TimeConfigApp(LCD& lcd, ControlState& state, HeaderWidget* header
   }
 
   // Create and arrange general widgets
-  header->setTitle("Time setting");
-  footer->setButtons("Save", "Clear");
+  header->setTitle(_("Time setting"));
+  footer->setButtons(_("Save"), _("Clear"));
 
   clearRect = new RectWidget(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), WP_COLOR_1);
 
   uint16_t yOff = header->height() + 5;
 
   // Add form
-  this->addInlineLabelInput(yOff, 120, timeZoneLabel, timeZoneInput, "Time offset:", 9);
+  this->addInlineLabelInput(yOff, 120, timeZoneLabel, timeZoneInput, _("Time offset:"), 9);
   this->errorLabel = new LabelWidget(0, yOff, lcd.width(), 25, "", TFT_RED, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
   yOff += this->errorLabel->height();
 
@@ -5471,7 +6596,7 @@ appEventResult TimeConfigApp::processEvent(EventType event) {
 
   }
 
-  return quit ? EXIT_APP : REDRAW_SCREEN;
+  return quit ? EXIT_APP : REDRAW_SCREEN | REDRAW_HEADER /*blink charge icon*/;
 }
 
 void TimeConfigApp::redrawScreen(bool redrawAll) {
@@ -5505,7 +6630,7 @@ ScreenConfigApp::ScreenConfigApp(LCD& lcd, ControlState& state, HeaderWidget* he
   ini.show();
 
   if (!ini.hasSection("screen")) {
-    log_e("adding section `screen`");
+    log_d("adding section `screen`");
     ini.addSection("screen");
     ini["screen"]["bright_level"] = "100";
 
@@ -5517,14 +6642,14 @@ ScreenConfigApp::ScreenConfigApp(LCD& lcd, ControlState& state, HeaderWidget* he
     ini["screen"]["sleep_after_s"] = "30";
   }
   if (!ini.hasSection("lock")) {
-    log_e("adding section `lock`");
+    log_d("adding section `lock`");
     ini.addSection("lock");
     ini["lock"]["lock_keyboard"] = "1";
   }
 
   // Create and arrange general widgets
-  header->setTitle("Screen settings");
-  footer->setButtons("Save", "Clear");
+  header->setTitle(_("Screen settings"));
+  footer->setButtons(_("Save"), _("Clear"));
 
   clearRect = new RectWidget(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), WP_COLOR_1);
 
@@ -5533,21 +6658,21 @@ ScreenConfigApp::ScreenConfigApp(LCD& lcd, ControlState& state, HeaderWidget* he
   // Add form
   const uint16_t labelWidth = 110;
   // - brightness
-  this->addInlineLabelSlider(yOff, labelWidth, brightLevelLabel, brightLevelSlider, "Brightness", 5, 100, "%", 19);
+  this->addInlineLabelSlider(yOff, labelWidth, brightLevelLabel, brightLevelSlider, _("Brightness"), 5, 100, "%", 19);
   this->addRuler(yOff, ruler1, rulerOff);
 
   // - dimming
-  this->addInlineLabelYesNo(yOff, labelWidth, dimmingLabel, dimmingChoice, "Dim screen");
-  this->addInlineLabelSlider(yOff, labelWidth, dimLevelLabel, dimLevelSlider, "Dim level", 5, 100, "%", 19);
-  this->addInlineLabelInput(yOff, labelWidth, dimAfterLabel, dimAfterInput, "Dim after, s", 6, InputType::Numeric);
+  this->addInlineLabelYesNo(yOff, labelWidth, dimmingLabel, dimmingChoice, _("Dim screen"));
+  this->addInlineLabelSlider(yOff, labelWidth, dimLevelLabel, dimLevelSlider, _("Dim level"), 5, 100, "%", 19);
+  this->addInlineLabelInput(yOff, labelWidth, dimAfterLabel, dimAfterInput, _("Dim after, s"), 6, InputType::Numeric);
   this->addRuler(yOff, ruler2, rulerOff);
 
   // - screen sleeping & lock
-  this->addInlineLabelYesNo(yOff, labelWidth, sleepingLabel, sleepingChoice, "Sleep screen");
+  this->addInlineLabelYesNo(yOff, labelWidth, sleepingLabel, sleepingChoice, _("Sleep screen"));
   yOff += 1;
-  this->addInlineLabelInput(yOff, labelWidth, sleepAfterLabel, sleepAfterInput, "Sleep after, s", 6, InputType::Numeric);
+  this->addInlineLabelInput(yOff, labelWidth, sleepAfterLabel, sleepAfterInput, _("Sleep after, s"), 6, InputType::Numeric);
   yOff += 1;
-  this->addInlineLabelYesNo(yOff, labelWidth, lockingLabel, lockingChoice, "Lock screen");
+  this->addInlineLabelYesNo(yOff, labelWidth, lockingLabel, lockingChoice, _("Lock screen"));
   this->addRuler(yOff, ruler3, rulerOff);
 
   this->errorLabel = new LabelWidget(0, yOff, lcd.width(), 25, "", TFT_RED, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
@@ -5617,11 +6742,11 @@ bool ScreenConfigApp::checkForm(int32_t &dimAfter, int32_t &sleepAfter, bool aut
   // - check dimAfter value
   if (dimAfterInput->getInt(dimAfter)) {
     if (dimAfter < 5) {
-      errorLabel->setText("Dimming delay too small");
+      errorLabel->setText(_("Dimming delay too small"));
       correct = false;
     }
   } else {
-    errorLabel->setText("Incorrect dimming delay");
+    errorLabel->setText(_("Incorrect dimming delay"));
     correct = false;
   }
   if (!correct && autocorrect) {
@@ -5633,14 +6758,14 @@ bool ScreenConfigApp::checkForm(int32_t &dimAfter, int32_t &sleepAfter, bool aut
   // - check sleepAfter value
   if (sleepAfterInput->getInt(sleepAfter)) {
     if (sleepAfter < 5) {
-      errorLabel->setText("Sleep delay too small");
+      errorLabel->setText(_("Sleep delay too small"));
       correct = false;
     } else if (correct && dimAfter > sleepAfter) {
-      errorLabel->setText("Error: sleep before dimming");
+      errorLabel->setText(_("Error: sleep before dimming"));
       correct = false;
     }
   } else {
-    errorLabel->setText("Incorrect sleep delay");
+    errorLabel->setText(_("Incorrect sleep delay"));
     correct = false;
   }
   if (!correct && autocorrect) {
@@ -5718,6 +6843,15 @@ appEventResult ScreenConfigApp::processEvent(EventType event) {
       ini["screen"]["bright_level"] = (int32_t)brightLevelSlider->getValue();
       ini["screen"]["dim_after_s"] = dimAfter;
       ini["screen"]["sleep_after_s"] = sleepAfter;
+      controlState.dimAfterMs = dimAfter*1000;
+      controlState.sleepAfterMs = sleepAfter*1000;
+      controlState.brightLevel = (int32_t)brightLevelSlider->getValue();
+      controlState.dimLevel = (int32_t)dimLevelSlider->getValue();
+      controlState.unscheduleEvent(SCREEN_DIM_EVENT);
+      controlState.scheduleEvent(SCREEN_DIM_EVENT, millis() + controlState.dimAfterMs);
+      controlState.unscheduleEvent(SCREEN_SLEEP_EVENT);
+      controlState.scheduleEvent(SCREEN_SLEEP_EVENT, millis() + controlState.sleepAfterMs);
+
       ini.store();
       quit = true;
     }
@@ -5773,7 +6907,7 @@ appEventResult ScreenConfigApp::processEvent(EventType event) {
 
   }
 
-  return quit ? EXIT_APP : REDRAW_SCREEN;
+  return quit ? EXIT_APP : REDRAW_SCREEN | REDRAW_HEADER /*blink charge icon*/;
 }
 
 void ScreenConfigApp::redrawScreen(bool redrawAll) {
@@ -5807,6 +6941,172 @@ void ScreenConfigApp::redrawScreen(bool redrawAll) {
   this->screenInited = true;
 }
 
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - -  LoraConfig app  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+LoraConfigApp::LoraConfigApp(LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget* footer)
+  : WindowedApp(lcd, state, header, footer), FocusableApp(1), ini(Storage::ConfigsFile) {
+  log_d("LoraConfigApp");
+
+  if (ini.load() || ini.restore()) {
+    if (ini.isEmpty() || !ini[0].hasKey("v") || strcmp(ini[0]["v"], "1")) {
+      log_d("unknown version or corrupt \"%s\" file", ini.filename());
+    }
+  } else {
+    ini[0]["desc"] = "WiPhone general configs";
+    ini[0]["v"] = "1";
+  }
+  IF_LOG(VERBOSE)
+  ini.show();
+
+  if (!ini.hasSection("lora")) {
+    log_d("adding section `lora`");
+    ini.addSection("lora");
+    ini["lora"]["onOff"] = "On";
+    ini["lora"]["freq"] = "915Mhz";
+    ini.store();
+    // ini["lora"]["resendUndelivereds"] = "No";
+  }
+
+  // Create and arrange general widgets
+  header->setTitle(_("LoRa settings"));
+  footer->setButtons(_("Save"), _("Back"));
+
+  clearRect = new RectWidget(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), WP_COLOR_1);
+
+  uint16_t yOff = header->height() + 5;
+
+  // Add form
+  onOffLabel = new LabelWidget(0, yOff, lcd.width(), 25, _("State:"), WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
+
+  onOffSwitch = new ChoiceWidget(lcd.width()*2.0/3, yOff, lcd.width()/3, 35);
+  onOffSwitch->addChoice("On");
+  onOffSwitch->addChoice("Off");
+  yOff += onOffSwitch->height();
+
+  freqLabel = new LabelWidget(0, yOff, lcd.width(), 25, _("Frequency:"), WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
+
+  frequencySelection = new ChoiceWidget(lcd.width()*2.0/3, yOff, lcd.width()/3, 35);
+  frequencySelection->addChoice("915Mhz");
+  frequencySelection->addChoice("868Mhz");
+  yOff += frequencySelection->height();
+
+  // resendUndeliveredsLabel = new LabelWidget(0, yOff, lcd.width(), 25, _("Resend undelivereds:"), WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
+
+  // resendIfUndelivered = new ChoiceWidget(lcd.width()*2.0/3, yOff, lcd.width()/3, 35);
+  // resendIfUndelivered->addChoice("No");
+  // resendIfUndelivered->addChoice("Yes");
+  // yOff += resendIfUndelivered->height();
+
+  // read on-off from ini file
+  if (ini.hasSection("lora") && ini["lora"].hasKey("onOff")) {
+    onOffSwitch->setValue((strcmp(ini["lora"]["onOff"], "On") == 0) ? 0 : 1);
+  } else {
+    onOffSwitch->setValue(0);//default ON
+  }
+
+  // read on-off from ini file
+  if (ini.hasSection("lora") && ini["lora"].hasKey("freq")) {
+    frequencySelection->setValue((strcmp(ini["lora"]["freq"], "915Mhz") == 0) ? 0 : 1);
+  } else {
+    frequencySelection->setValue(0);//default 915Mhz
+  }
+
+  // read resend-undelivereds from ini file
+  // if (ini.hasSection("lora") && ini["lora"].hasKey("resendUndelivereds")) {
+  //   resendIfUndelivered->setValue((strcmp(ini["lora"]["resendUndelivereds"], "No") == 0) ? 0 : 1);
+  // } else {
+  //   resendIfUndelivered->setValue(0);//default No
+  // }
+
+  lora.setFrequency(frequencySelection->getValue() == 0 ? (float)915.0 : (float)868.0);// can be defined in a header
+  lora.setOnOff(onOffSwitch->getValue() == 0 ? true : false);
+  // lora.setSendUndelivereds(resendIfUndelivered->getValue() == 1);
+
+  // Focusables
+  addFocusableWidget(onOffSwitch);
+  addFocusableWidget(frequencySelection);
+  // addFocusableWidget(resendIfUndelivered);
+
+  setFocus(onOffSwitch);
+
+  screenInited = false;
+}
+
+LoraConfigApp::~LoraConfigApp() {
+  log_d("destroy LoraConfigApp");
+
+  ini.backup();
+
+  delete onOffLabel;
+  delete freqLabel;
+  // delete resendUndeliveredsLabel;
+  delete onOffSwitch;
+  delete frequencySelection;
+  // delete resendIfUndelivered;
+}
+
+appEventResult LoraConfigApp::processEvent(EventType event) {
+  log_v("<-- enter function");
+
+  bool quit = false;
+
+  FocusableWidget* focusedWidget = getFocused();
+
+  if (event == WIPHONE_KEY_DOWN || event == WIPHONE_KEY_UP) {
+
+    // Change focus
+    nextFocus(event == WIPHONE_KEY_DOWN);
+
+  } else if (event == WIPHONE_KEY_END || event == WIPHONE_KEY_BACK) {
+
+    quit = true;
+
+  } else if (LOGIC_BUTTON_OK(event)) {
+
+    log_d("Save button pressed");
+    ini["lora"]["onOff"] = (onOffSwitch->getValue() == 0 ? "On" : "Off");
+    ini["lora"]["freq"] = (frequencySelection->getValue() == 0 ? "915Mhz" : "868Mhz");
+    // ini["lora"]["resendUndelivereds"] = (resendIfUndelivered->getValue() == 0 ? "No" : "Yes");
+    if (ini.store()) {
+      log_d("new Lora settings are saved>>>>>>>>>>>>");
+    }
+
+    lora.setOnOff(onOffSwitch->getValue() == 0 ? true : false);
+
+    lora.setFrequency(frequencySelection->getValue() == 0 ? (float)915.0 : (float)868.0);// can be defined in a header
+    // lora.setSendUndelivereds(resendIfUndelivered->getValue() == 0 ? false : true);
+    //lora.setOnOff(onOffSwitch->getValue() == 0 ? true : false);//FIXME not implemented in lora.cpp
+
+    quit = true;
+  } else {
+
+    // Pass button to whatever is focused
+
+    if (focusedWidget != NULL) {
+      focusedWidget->processEvent(event);
+    }
+
+  }
+
+  return quit ? EXIT_APP : REDRAW_SCREEN | REDRAW_HEADER /*blink charge icon*/;
+}
+
+void LoraConfigApp::redrawScreen(bool redrawAll) {
+  log_d("redrawScreen LoraConfigApp");
+
+  if (!screenInited || redrawAll) {
+    ((GUIWidget*) clearRect)->redraw(lcd);
+    ((GUIWidget*) onOffLabel)->redraw(lcd);
+    ((GUIWidget*) freqLabel)->redraw(lcd);
+    // ((GUIWidget*) resendUndeliveredsLabel)->redraw(lcd);
+  }
+  ((GUIWidget*) onOffSwitch)->redraw(lcd);
+  ((GUIWidget*) frequencySelection)->redraw(lcd);
+  // ((GUIWidget*) resendIfUndelivered)->redraw(lcd);
+
+  screenInited = true;
+}
+
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - -  Networks app  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 NetworksApp::NetworksApp(LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget* footer)
@@ -5815,26 +7115,50 @@ NetworksApp::NetworksApp(LCD& lcd, ControlState& state, HeaderWidget* header, Fo
 
   this->loadIni();
 
-  // Create and arrange general widgets
-  menu = NULL;
-  editNetwork = NULL;
+  if(wifiOn) {
+    // Create and arrange general widgets
+    menu = NULL;
+    editNetwork = NULL;
 
-  // Subscribe to app timer event
-  controlState.msAppTimerEventLast = millis();
-  controlState.msAppTimerEventPeriod = 1000;
+    // Subscribe to app timer event
+    controlState.msAppTimerEventLast = millis();
+    controlState.msAppTimerEventPeriod = 1000;
 
-  // Start ASYNC scan
-  log_v("scanning");
-  wifiState.disconnect();   // disconnect and do not reconnect        TODO: after connecting to a network, don't go back to scanning view
-  delay(100);
+    // Start ASYNC scan
+    log_v("scanning");
+
+    /*
+      this line disconnects the current WiFi connection, so it is commented.
+    */
+    //wifiState.disconnect();   // disconnect and do not reconnect        TODO: after connecting to a network, don't go back to scanning view
+
+
+    delay(100);
+  } else {
+    gui.showPopup(NETWORKS_ERROR_POPUP_HEADER, NETWORKS_ERR_POPUP_2_1ST_LINE,
+                  NETWORKS_ERR_POPUP_2_2ND_LINE, NETWORKS_ERR_POPUP_2_3RD_LINE,
+                  NETWORKS_ERR_POPUP_2_4RD_LINE, "", "OK",
+                  (unsigned char*)icon_phone_small_w_crossed, sizeof(icon_phone_small_w_crossed));
+  }
 
   screenInited = false;
 
   setHeaderFooter();
+
+  backupWiFiConnected = wifiState.isConnected();
+  backupConnectedSsid = wifiState.ssid() ? strdup(wifiState.ssid()) : nullptr;
 }
 
 NetworksApp::~NetworksApp() {
   log_v("destroy NetworksApp");
+
+  /*this is guard not reserve the connected state if scan networks page closed while scan resets the wifi*/
+  if(backupWiFiConnected && backupConnectedSsid) {
+    wifiState.connectTo(backupConnectedSsid);
+  }
+  // global variables shouldn't be free'd in destructors.
+  //freeNull((void **) &backupConnectedSsid);  //because it is malloc'd by strdup.
+
   if (menu) {
     delete menu;
   }
@@ -5844,8 +7168,8 @@ NetworksApp::~NetworksApp() {
 }
 
 void NetworksApp::setHeaderFooter() {
-  header->setTitle("Networks");
-  footer->setButtons("Select", "Back");
+  header->setTitle(_("Networks"));
+  footer->setButtons(_("Select"), _("Back"));
 }
 
 void NetworksApp::loadIni() {
@@ -5866,6 +7190,10 @@ appEventResult NetworksApp::processEvent(EventType event) {
   log_v("processEvent NetworksApp");
 
   appEventResult res = DO_NOTHING;
+
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
+
   if (editNetwork != NULL) {
 
     // Editing a network
@@ -5886,7 +7214,12 @@ appEventResult NetworksApp::processEvent(EventType event) {
       screenInited = false;
       delete menu;
       menu = NULL;
-      controlState.msAppTimerEventPeriod = 1000;    // resume periodic checks
+      if(wifiOn) {
+        controlState.msAppTimerEventPeriod = 1000;    // resume periodic checks
+      } else {
+        WiFi.scanDelete();
+        controlState.msAppTimerEventPeriod = 0;     // unsubscribe from periodic "anyevent"
+      }
       this->loadIni();
       setHeaderFooter();
       res = (res | REDRAW_ALL) & ~(appEventResult)EXIT_APP;
@@ -5898,9 +7231,10 @@ appEventResult NetworksApp::processEvent(EventType event) {
 
   } else if (event == APP_TIMER_EVENT) {
 
+    bool checkPrefer = false;
     log_v("processing timer event");
     int16_t rn = WiFi.scanComplete();
-    log_v("networks: ", rn, DEC);
+    log_v("networks: %d %d", rn, DEC);
     if (rn>=0) {
       // Remember currently selected network
       char* selected = NULL;
@@ -5920,7 +7254,7 @@ appEventResult NetworksApp::processEvent(EventType event) {
         delete menu;
       }
       menu = new MenuWidget(0, header->height()+menuTopPadding, lcd.width(), lcd.height() - header->height() - footer->height() - menuTopPadding,
-                            "No networks", fonts[OPENSANS_COND_BOLD_20], N_MAX_ITEMS, 1);
+                            _("No networks"), fonts[OPENSANS_COND_BOLD_20], N_MAX_ITEMS, 1);
       menu->setStyle(MenuWidget::ALTERNATE_STYLE, WP_ACCENT_1, WP_COLOR_1, WP_COLOR_0, WP_ACCENT_0);
       char text[50];
 
@@ -5946,16 +7280,57 @@ appEventResult NetworksApp::processEvent(EventType event) {
         if (selected!=NULL && !strcmp(ssid.c_str(), selected)) {
           menu->selectLastOption();
         }
+
+        if (backupConnectedSsid && strcmp(ssid.c_str(), backupConnectedSsid) == 0 ) {
+          checkPrefer = true;
+        }
       }
       log_v("deleting selected");
       freeNull((void **) &selected);
+
+
+
       res |= REDRAW_SCREEN;
     } else if (rn == WIFI_SCAN_FAILED) {
       log_e("ERROR: scanning networks failed");
     }
 
+    bool hasCleanedUpWifi = false;
+    static int failScanCounter = 0;
+
+    if(rn <= 0) {
+      failScanCounter++;
+      if(failScanCounter >= 10) {
+        //gui.showPopup("Scan Error", "Resetting the WiFi", "state to fix scan", "errors.", "OK", "Back",
+        //              (unsigned char*)icon_message_w, sizeof(icon_message_w));
+        failScanCounter = 0;
+        //wifiState.disable();
+        //IMPORTANT NOTE: If the currently connected WiFi device is OFF, the scan cannot find
+        //                any WiFi network. Then, we should disconnect it to fix this problem.
+        //                See issue #171.
+        WiFi.disconnect(false,true);
+        hasCleanedUpWifi = true;
+      }
+    } else {
+      failScanCounter = 0;
+    }
     // Rescan
-    log_v("rescanning");
+    log_d("rescanning");
+    // if (!backupWiFiConnected) {
+    //   WiFi.disconnect(false,true);
+    // }
+
+    //checkPrefer variable means whether the last connected ssid is in the wifi list of the last scan or not.
+
+    if( !checkPrefer && backupWiFiConnected || !backupWiFiConnected) {
+      //wifiState.setConnected(false);
+    }
+
+    //the last connected wifi device is still in the range
+    if (checkPrefer && backupWiFiConnected && !wifiState.isConnected()) {
+      wifiState.connectTo(backupConnectedSsid);
+    }
+
     WiFi.scanNetworks(true, false, false, 750);
 
   } else if (IS_KEYBOARD(event) && menu!=NULL) {
@@ -5983,14 +7358,17 @@ void NetworksApp::redrawScreen(bool redrawAll) {
 
   } else {
 
-    if (!screenInited || redrawAll) {
+    if (!screenInited || redrawAll || menu == NULL) {
       GUIWidget::corrRect(lcd, 0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), BLACK);
       lcd.setTextColor(THEME_TEXT_COLOR, THEME_BG);
       lcd.setTextFont(fonts[OPENSANS_COND_BOLD_20]);
       lcd.setTextDatum(TL_DATUM);
-      lcd.drawString("Scanning...", 1, header->height() + menuTopPadding);
-    }
-    if (menu != NULL) {
+      if(wifiOn) {
+        lcd.drawString(_("Scanning..."), 1, header->height() + menuTopPadding);
+      } else {
+        lcd.drawString(_("WiFi OFF!"), 1, header->height() + menuTopPadding);
+      }
+    } else if (menu != NULL) {
       ((GUIWidget*) menu)->redraw(lcd);
     }
 
@@ -6011,7 +7389,7 @@ CircleApp::CircleApp(LCD& lcd, ControlState& state) : WiPhoneApp(lcd, state) {
   lcd.setTextColor(WHITE, BLACK);
   lcd.setTextFont(font);
   lcd.setTextDatum(TC_DATUM);
-  lcd.drawString("Circles App", lcd.width()/2, (lcd.height()-font->height())/2);
+  lcd.drawString(_("Circles App"), lcd.width()/2, (lcd.height()-font->height())/2);
 }
 
 CircleApp::~CircleApp() {
@@ -6114,9 +7492,9 @@ void WidgetDemoApp::redrawScreen(bool redrawAll) {
   // SOLUTIONS: 1) use only non-transparent font so that window is never set to 1px height (as in the following)
   //            2) use sprites
   //            3) use SPI_MODE3
-  lcd.drawString("Quick lazy", 20, 43);
+  lcd.drawString(_("Quick lazy"), 20, 43);
   lcd.setSmoothTransparency(false);
-  lcd.drawString("Quick lazy", 20, 43 + lcd.fontHeight() + 5);
+  lcd.drawString(_("Quick lazy"), 20, 43 + lcd.fontHeight() + 5);
 }
 
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - -  Pictures Demo app  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -6155,7 +7533,7 @@ void PicturesDemoApp::redrawScreen(bool redrawAll) {
     lcd.fillScreen(BLACK);
     lcd.setTextColor(RED, BLACK);
     lcd.setTextSize(2);
-    lcd.drawString("Error", lcd.width()/2, lcd.height()/2, 2);
+    lcd.drawString(_("Error"), lcd.width()/2, lcd.height()/2, 2);
   }
   log_d("time: %lu", micros()-t);
 }
@@ -6206,7 +7584,7 @@ void FontDemoApp::redrawScreen(bool redrawAll) {
   }
   t = micros()-t;
   lcd.setCursor(0,200);
-  lcd.print("Time: ");
+  lcd.print(_("Time: "));
   lcd.println(t);
 }
 
@@ -6229,7 +7607,8 @@ appEventResult ClockApp::processEvent(EventType event) {
     return EXIT_APP;
   }
   if (controlState.locked) {
-    return DO_NOTHING;
+    //we should blink the charge icon and may need to animate the other header icons in the lock screen
+    return REDRAW_HEADER;
   }
   if (NONKEY_EVENT_ONE_OF(event, TIME_UPDATE_EVENT | WIFI_ICON_UPDATE_EVENT | BATTERY_UPDATE_EVENT | REGISTRATION_UPDATE_EVENT | BATTERY_BLINK_EVENT | USB_UPDATE_EVENT)) {
     // TODO: optimize this app to only redraw small portion on events like WIFI_ICON_UPDATE_EVENT, BATTERY_UPDATE_EVENT, REGISTRATION_UPDATE_EVENT, BATTERY_BLINK_EVENT
@@ -6284,7 +7663,7 @@ void ClockApp::redrawScreen(bool redrawAll) {
     lcd.setTextFont(fonts[AKROBAT_BOLD_90]);
     lcd.drawString("00:00", cx, yOff);
     lcd.setTextFont(fonts[AKROBAT_BOLD_24]);
-    lcd.drawString("Network: waiting NTP", cx, yOff+lcd.fontHeight()+3);
+    lcd.drawString(_("Network: waiting NTP"), cx, yOff+lcd.fontHeight()+3);
   }
   yOff += lcd.fontHeight()+21;
 
@@ -6296,10 +7675,10 @@ void ClockApp::redrawScreen(bool redrawAll) {
   }
 
   // Print center button text
-  const char* msg = "Menu";
+  const char* msg = _("Menu");
   if (controlState.locked) {
     // Locked text
-    msg = (controlState.unlockButton1 == WIPHONE_KEY_OK) ? "Press * to unlock" : "Locked. Press OK";
+    msg = (controlState.unlockButton1 == WIPHONE_KEY_OK) ? _("Press * to unlock") : _("Locked. Press OK");
   }
   lcd.drawString(msg, cx, lcd.height()-7);
   lcd.setSmoothTransparency(false);
@@ -6403,13 +7782,15 @@ MessagesApp::~MessagesApp() {
 void MessagesApp::enterState(MessagesState_t state) {
   log_i("enterState %d", (int)state);
   if (state == MAIN) {
-    header->setTitle("Messages");
+    header->setTitle(_("Messages"));
+    //Select button may be hidden after returning back from submenus
+    footer->setButtons(_("Select"), _("Back"));
   } else if (state == INBOX) {
-    header->setTitle("Inbox");
+    header->setTitle(_("Inbox"));
   } else if (state == OUTBOX) {
-    header->setTitle("Outbox");
+    header->setTitle(_("Outbox"));
   }
-  footer->setButtons("Select", "Back");
+  footer->setButtons(_("Select"), _("Back"));
   appState = state;
 }
 
@@ -6417,6 +7798,9 @@ appEventResult MessagesApp::processEvent(EventType event) {
   log_i("processEvent MessagesApp %d", event);
 
   appEventResult res = REDRAW_SCREEN;
+
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
 
   if (event == NEW_MESSAGE_EVENT) {
 
@@ -6429,29 +7813,59 @@ appEventResult MessagesApp::processEvent(EventType event) {
     // Update INBOX screen if it is the current screen
     if (appState == INBOX) {
       // New message arrived: redraw inbox
+
+      gui.reloadMessages();
       this->createLoadMessageMenu(INCOMING, inboxOffset, 0);
-      res |= REDRAW_SCREEN;
+      footer->setButtons(_("Select"), _("Back"));
+      res |= REDRAW_SCREEN | REDRAW_FOOTER;
     }
 
     // We assume that header will be redrawn by GUI class for this event, so we don't do res |= REDRAW_HEADER here
 
+  } else if(event == MESSAGES_ACK_RECVD_EVENT || event == MESSAGE_SENT_EVENT /*&& appState == OUTBOX*/) {
+    /* An acknowledge msg is received, so refresh messages to see the sent msg with double ticks.
+    */
+    gui.reloadMessages();
+    this->createLoadMessageMenu(SENT, sentOffset, 0);
   } else if (subApp) {
     if ((res = subApp->processEvent(event)) & EXIT_APP) {
       if (appState == COMPOSING) {
         this->createMainMenu();       // update main menu to show new sent messages count
         enterState(MAIN);
       } else {
-        // If message was deleted, reload menus
+        // If message was deleted or replied, reload menus
         if ((res & REDRAW_ALL) == REDRAW_ALL) {       // special signal to reload the messages
           // Clear message cache
           flash.messages.clearPreloaded();
           // Create menus
           int32_t offset = ((ViewMessageApp*)subApp)->messageOffset;        // TODO: use it for preserving the visible offset
+
+          //FIXME added this line to solve the problem that the sent folder isn't updated.
+
+          //gui.reloadMessages();
+          this->createLoadMessageMenu(INCOMING, -1, 0);
+
           this->createLoadMessageMenu(appState==INBOX ? INCOMING : SENT, -1, 0);
           this->createMainMenu();
+        } else {
+          this->createLoadMessageMenu(appState == INBOX, -1, 0);
         }
         // After viewing message `appState` stays the same, just need to change Title and Header widgets
         enterState(appState);
+
+        if(appState == INBOX) {
+          if(inboxMenu->size() > 0) {
+            footer->setButtons(_("Select"), _("Back"));
+          } else {
+            footer->setButtons(NULL, _("Back"));
+          }
+        } else if(appState == OUTBOX) {
+          if(sentMenu->size() > 0) {
+            footer->setButtons(_("Select"), _("Back"));
+          } else {
+            footer->setButtons(NULL, _("Back"));
+          }
+        }
       }
 
       delete subApp;
@@ -6488,8 +7902,23 @@ appEventResult MessagesApp::processEvent(EventType event) {
       if (appState == INBOX) {
         // Initialize
         this->createLoadMessageMenu(INCOMING, inboxOffset, 0);
+        if(inboxMenu->size() > 0) {
+          footer->setButtons(_("Select"), _("Back"));
+        } else {
+          footer->setButtons(NULL, _("Back"));
+        }
       } else if (appState == OUTBOX) {
+
+        //FIXME added this line to solve the problem that the sent folder isn't updated.
+        //gui.reloadMessages();
+        this->createLoadMessageMenu(INCOMING, inboxOffset, 0);
+
         this->createLoadMessageMenu(SENT, sentOffset, 0);
+        if(sentMenu->size() > 0) {
+          footer->setButtons(_("Select"), _("Back"));
+        } else {
+          footer->setButtons(NULL, _("Back"));
+        }
       } else if (appState == COMPOSING) {
         subApp = new CreateMessageApp(lcd, controlState, flash, header, footer);
       }
@@ -6548,13 +7977,15 @@ appEventResult MessagesApp::processEvent(EventType event) {
       res |= REDRAW_ALL;
     } else if (LOGIC_BUTTON_OK(event)) {
       // View message
-      inboxMenu->processEvent(event);
-      MenuOption::keyType selectedKey = inboxMenu->readChosen();
-      int32_t messageOffset = this->decodeMessageOffset(selectedKey);
-      subApp = new ViewMessageApp(messageOffset, lcd, controlState, flash, header, footer);
-      // Reload this menu   TODO: fix offset, selected message will be on top of now, that's not intuitive
-      this->createLoadMessageMenu(appState == INBOX, messageOffset, selectedKey);
-      res |= REDRAW_ALL;
+      if(inboxMenu->size() > 0) {
+        inboxMenu->processEvent(event);
+        MenuOption::keyType selectedKey = inboxMenu->readChosen();
+        int32_t messageOffset = this->decodeMessageOffset(selectedKey);
+        subApp = new ViewMessageApp(messageOffset, lcd, controlState, flash, header, footer, MessagesState_t::INBOX);
+        // Reload this menu   TODO: fix offset, selected message will be on top of now, that's not intuitive
+        this->createLoadMessageMenu(appState == INBOX, messageOffset, selectedKey);
+        res |= REDRAW_ALL;
+      }
     }
 
   } else if (appState == OUTBOX) {
@@ -6564,13 +7995,15 @@ appEventResult MessagesApp::processEvent(EventType event) {
       res |= REDRAW_ALL;
     } else if (LOGIC_BUTTON_OK(event)) {
       // View message
-      sentMenu->processEvent(event);
-      MenuOption::keyType selectedKey = sentMenu->readChosen();
-      int32_t messageOffset = this->decodeMessageOffset(selectedKey);
-      subApp = new ViewMessageApp(messageOffset, lcd, controlState, flash, header, footer);
-      // Reload this menu   TODO: fix offset, selected message will be on top of now, that's not intuitive
-      this->createLoadMessageMenu(appState == INBOX, messageOffset, selectedKey);
-      res |= REDRAW_ALL;
+      if(sentMenu->size() > 0) {
+        sentMenu->processEvent(event);
+        MenuOption::keyType selectedKey = sentMenu->readChosen();
+        int32_t messageOffset = this->decodeMessageOffset(selectedKey);
+        subApp = new ViewMessageApp(messageOffset, lcd, controlState, flash, header, footer, MessagesState_t::OUTBOX);
+        // Reload this menu   TODO: fix offset, selected message will be on top of now, that's not intuitive
+        this->createLoadMessageMenu(appState == INBOX, messageOffset, selectedKey);
+        res |= REDRAW_ALL;
+      }
     }
 
   }
@@ -6617,27 +8050,27 @@ void MessagesApp::createMainMenu() {
   mainMenu = new MenuWidget(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), NULL, fonts[AKROBAT_EXTRABOLD_22], N_MENU_ITEMS, 8);
   mainMenu->setStyle(MenuWidget::DEFAULT_STYLE, BLACK, WHITE, WHITE, WP_ACCENT_1);
 
-  mainMenu->addOption("New Message", NULL, 3, 1, icon_Write_b, sizeof(icon_Write_b), icon_Write_w, sizeof(icon_Write_w));
+  mainMenu->addOption(_("New Message"), NULL, 3, 1, icon_Write_b, sizeof(icon_Write_b), icon_Write_w, sizeof(icon_Write_w));
   char str[25];
   str[0] = '\0';
   if (flash.messages.isLoaded()) {
     int32_t n = flash.messages.inboxTotalSize();
     if (n>0) {
-      snprintf(str, sizeof(str), "%d Messages", n);
+      snprintf(str, sizeof(str), _("%d Messages"), n);
     } else {
-      snprintf(str, sizeof(str), "No messages");
+      snprintf(str, sizeof(str), _("No messages"));
     }
   }
-  mainMenu->addOption("Inbox", str, 1, 1, icon_Inbox_b, sizeof(icon_Inbox_b), icon_Inbox_w, sizeof(icon_Inbox_w));
+  mainMenu->addOption(_("Inbox"), str, 1, 1, icon_Inbox_b, sizeof(icon_Inbox_b), icon_Inbox_w, sizeof(icon_Inbox_w));
   if (flash.messages.isLoaded()) {
     int32_t n = flash.messages.sentTotalSize();
     if (n>0) {
-      snprintf(str, sizeof(str), "%d Messages", n);
+      snprintf(str, sizeof(str), _("%d Messages"), n);
     } else {
-      snprintf(str, sizeof(str), "No messages");
+      snprintf(str, sizeof(str), _("No messages"));
     }
   }
-  mainMenu->addOption("Sent", str, 2, 1, icon_Outbox_b, sizeof(icon_Outbox_b), icon_Outbox_w, sizeof(icon_Outbox_w));
+  mainMenu->addOption(_("Sent"), str, 2, 1, icon_Outbox_b, sizeof(icon_Outbox_b), icon_Outbox_w, sizeof(icon_Outbox_w));
 
   if (selectedKey) {
     mainMenu->select(selectedKey);
@@ -6649,10 +8082,14 @@ void MessagesApp::createLoadMessageMenu(bool incoming, int32_t offset, MenuOptio
 
   // Create new menu widget
   MenuWidget* menu = new MenuWidget(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(),
-                                    incoming ? "Inbox is empty" : "No sent messages",
+                                    incoming ? _("Inbox is empty") : _("No sent messages"),
                                     fonts[AKROBAT_EXTRABOLD_22], N_MENU_ITEMS, 8);
-  menu->setStyle(MenuWidget::DEFAULT_STYLE,   BLACK, GRAY_85, GRAY_95, WP_ACCENT_1);    // Read messages & sent
+  menu->setStyle(MenuWidget::DEFAULT_STYLE,   BLACK, GRAY_85, GRAY_95, WP_ACCENT_1);    // Read messages
   menu->setStyle(MenuWidget::ALTERNATE_STYLE, BLACK, WHITE, WHITE, WP_ACCENT_S);        // Unread messages
+
+  //this was added to use within outbox unsent style, but it needs more work to do because menuoption or menuwidget uses
+  //the value of the style as hard coded i.e color == 1. But UNSENT_SLYE will have value of 3
+  //menu->setStyle(MenuWidget::UNSENT_STYLE,   BLACK, GRAY_85, GRAY_95, WP_ACCENT_1);    // Sent messages
 
   if (incoming) {
     if (inboxMenu) {
@@ -6674,7 +8111,18 @@ void MessagesApp::createLoadMessageMenu(bool incoming, int32_t offset, MenuOptio
   for (auto it = flash.messages.iteratorCount(offset, N_MENU_ITEMS); it.valid(); ++it) {
     log_i("Looping over messages");
     MenuOption::keyType key = this->encodeMessageOffset((int32_t)it);
-    option = new MenuOptionIconnedTimed(key, it->isRead() ? MenuWidget::DEFAULT_STYLE : MenuWidget::ALTERNATE_STYLE, it->getOtherUri(), it->getMessageText(), it->getTime());
+    if(incoming)
+      option = new MenuOptionIconnedTimed(key, it->isRead() ? MenuWidget::DEFAULT_STYLE : MenuWidget::ALTERNATE_STYLE, it->getOtherUri(),
+                                          it->getMessageText(), it->getTime());
+    else if(it->isSent()) {
+      // This case is for sent messages which an acknowledge message is received from the other side.
+      option = new MenuOptionIconnedTimed(key, MenuWidget::DEFAULT_STYLE, it->getOtherUri(), it->getMessageText(), it->getTime(),
+                                          65535U, (unsigned char*)icon_doubletick, sizeof(icon_doubletick));
+    } else {
+      // This case is for sent messages which an acknowledge message has NOT been received from the other side.
+      option = new MenuOptionIconnedTimed(key, MenuWidget::DEFAULT_STYLE, it->getOtherUri(), it->getMessageText(), it->getTime(),
+                                          65535U, (unsigned char*)icon_check_or_tick, sizeof(icon_check_or_tick));
+    }
     if (option) {
       menu->addOption(option);
     }
@@ -6727,11 +8175,11 @@ void CreateMessageApp::setupUI(const char* sipUri, bool showMessageType) {
 
   uint16_t yOff = header->height();
 
-  label1 = new LabelWidget(0, yOff, lcd.width(), 25, "To:", WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
+  label1 = new LabelWidget(0, yOff, lcd.width(), 25, _("To:"), WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
   yOff += label1->height();
 
   addr = new TextInputWidget(0, yOff, lcd.width(), 35, controlState, 100, fonts[AKROBAT_BOLD_20], InputType::AlphaNum, 8);
-  addr->setText(sipUri ? sipUri : "");
+  addr->setText(sipUri ? sipUri : "sip:");
   yOff += addr->height();
 
   if (showMessageType) {
@@ -6743,11 +8191,11 @@ void CreateMessageApp::setupUI(const char* sipUri, bool showMessageType) {
     sendMessageAs = NULL;
   }
 
-  label2 = new LabelWidget(0, yOff, lcd.width(), 25, "Message:", WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
+  label2 = new LabelWidget(0, yOff, lcd.width(), 25, _("Message:"), WP_ACCENT_1, WP_COLOR_1, fonts[AKROBAT_BOLD_18], LabelWidget::LEFT_TO_RIGHT, 8);
   yOff += label1->height();
 
   text = new MultilineTextWidget(0, yOff, lcd.width(), lcd.height()-yOff-footer->height(),
-                                 "type your message", controlState, 1000, fonts[AKROBAT_BOLD_20], InputType::AlphaNum, 8, 5);
+                                 _("type your message"), controlState, 1000, fonts[AKROBAT_BOLD_20], InputType::AlphaNum, 8, 5);
   text->setText("");    // TODO: allow a template like "Hello!\nHow are you doing?"
 
 
@@ -6789,13 +8237,13 @@ CreateMessageApp::~CreateMessageApp() {
 }
 
 void CreateMessageApp::setHeaderFooter() {
-  header->setTitle("New Message");
-  footer->setButtons(this->getFocused()==addr ? "Choose" : "Send", "Clear");
+  header->setTitle(_("New Message"));
+  footer->setButtons(this->getFocused()==addr ? _("Choose") : _("Send"), _("Clear"));
 }
 
 bool CreateMessageApp::isSipAddress(const char* address) {
   log_d("#### checking address type: %s", address);
-  if (strncmp(address, "LORA:", 5) == 0) {
+  if (strncasecmp(address, "LORA:", 5) == 0) {
     return false;
   }
 
@@ -6823,7 +8271,7 @@ bool CreateMessageApp::hasSipAndLora(const char* address) {
     return false;
   }
 
-  if (strncmp(address, "LORA:", 5) != 0) {
+  if (strncasecmp(address, "LORA:", 5) != 0) {
     return false;
   }
 
@@ -6841,7 +8289,7 @@ const char* CreateMessageApp::extractAddress(const char* address, MessageType_t 
   memset(ra, 0x00, sizeof(ra));
   switch (type) {
   case SIP:
-    if (strncmp(address, "LORA:", 5) == 0) {
+    if (strncasecmp(address, "LORA:", 5) == 0) {
       int start = 0;
       for (start = 0; start < strlen(address); ++start) {
         if (address[start] == '!') {
@@ -6854,7 +8302,7 @@ const char* CreateMessageApp::extractAddress(const char* address, MessageType_t 
     }
     break;
   case LORA: {
-    if (strncmp(address, "LORA:", 5) == 0) {
+    if (strncasecmp(address, "LORA:", 5) == 0) {
       int end = 0;
       for (end = 0; end < strlen(address); ++end) {
         if (address[end] == '!') {
@@ -6879,6 +8327,10 @@ appEventResult CreateMessageApp::processEvent(EventType event) {
   log_i("processEvent CreateMessageApp");
 
   appEventResult res = DO_NOTHING;
+
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
+
   if (subApp) {
     if ((res |= subApp->processEvent(event)) & EXIT_APP) {
       const char* sipUri = ((PhonebookApp*)subApp)->getSelectedSipUri();
@@ -6939,24 +8391,109 @@ appEventResult CreateMessageApp::processEvent(EventType event) {
 
       // Collect message data
       const char* fromUri  = controlState.fromUriDyn;
-      const char* toUri    = addr->getText();
+      const char* toUriTemp    = addr->getText();
       const char* message  = text->getText();
       bool        incoming = false;
       char loraAddress[100] = {0};
-      bool sipMessage = isSipAddress(toUri);
+      bool sipMessage = false;
+      const char* toUri;
+
+      string toUriStr(toUriTemp);
+
+      bool isLoRa = false;
+      if(toUriStr.length() == 6 && toUriStr[3] != ':' || (strncasecmp(toUriTemp, "LORA:", 5) == 0) ) {
+        isLoRa = true;
+      }
+
+      if (toUriStr.find("@") == string::npos) {
+
+        /*decide adding sip server to the "to" address. if it is a LoRa address, don't add sip server. or,
+        if it is an empty sip address, don't add sip server*/
+        if(!isLoRa && !((strncasecmp(toUriTemp, "sip:", 4) == 0 && toUriStr.length() == 4)) && (toUriStr.length() > 0)) {
+          //sip server can be added because the address is a non-empty sip.
+          string sipUrl = fromUri;
+          size_t pos = sipUrl.find("@");
+          if((/*"unsigned" causes FFFF instead of -1*/int)pos > 0) {
+            log_d("pos: %d\n", pos);
+            string sipServer = sipUrl.substr(pos);
+            toUriStr += sipServer;
+          }
+        }
+        toUri = toUriStr.c_str();
+
+        sipMessage = isSipAddress(toUri);
+      } else {
+        toUri = toUriTemp;
+
+        sipMessage = isSipAddress(toUri);
+      }
+
+      if(!message || *message == 0 || !toUri || *toUri == 0 || (strncmp(toUri, "sip:", 4) == 0 && strlen(toUri) == 4)) {
+        //display an error popup
+        gui.showPopup(MSG_ERROR_POPUP_HEADER,
+                      MSG_ERR_POPUP_2_1ST_LINE,
+                      MSG_ERR_POPUP_2_2ND_LINE,
+                      MSG_ERR_POPUP_2_3RD_LINE,
+                      MSG_ERR_POPUP_2_4RD_LINE, "", "OK", (unsigned char*)icon_message_w, sizeof(icon_message_w));
+        return res | REDRAW_ALL;
+      }
+
+      /*
+      Prevent sending SIP messages without WiFi nor SIP conn. Ensure the message type is SIP, not LoRa.
+      If the slider for selecting SIP/LoRa (sendMessageAs) is hidden, the toUri is checked to ensure it is not LoRa.
+      */
+      bool popupShown = false;
+      if((!sendMessageAs && !(strncasecmp(toUri, "LORA:", 5) == 0 || strlen(toUri) == 6&&toUri[3] != ':'))
+          || sendMessageAs && sendMessageAs->getValue() == MessageType_t::SIP) {
+        if(!wifiState.isConnected()) {
+          gui.showPopup(MSG_ERROR_POPUP_HEADER,
+                        MSG_ERR_POPUP_1_1ST_LINE,
+                        MSG_ERR_POPUP_1_2ND_LINE,
+                        MSG_ERR_POPUP_1_3RD_LINE,
+                        MSG_ERR_POPUP_1_4RD_LINE, "", "OK", (unsigned char*)icon_message_w, sizeof(icon_message_w));
+          popupShown = true;
+        } else if(!controlState.sipRegistered) {
+          gui.showPopup(MSG_ERROR_POPUP_HEADER,
+                        MSG_ERR_POPUP_5_1ST_LINE,
+                        MSG_ERR_POPUP_5_2ND_LINE,
+                        MSG_ERR_POPUP_5_3RD_LINE,
+                        MSG_ERR_POPUP_5_4RD_LINE, "", "OK", (unsigned char*)icon_message_w, sizeof(icon_message_w));
+          popupShown = true;
+        }
+      }
+
+      bool startsWithLora = (strncasecmp(toUri, "LORA:", 5) == 0);
+      //prevent sending LoRa msg to a number less than 6 digits
+      if(!popupShown && (!sendMessageAs && (startsWithLora || toUri[3] != ':'/*not sip:*/))
+          || sendMessageAs && sendMessageAs->getValue() == MessageType_t::LORA) {
+        int toUriLen = strlen(toUri);
+        if(startsWithLora && toUriLen < 11 || !startsWithLora && toUriLen < 6) {
+          gui.showPopup(MSG_ERROR_POPUP_HEADER,
+                        MSG_ERR_POPUP_6_1ST_LINE,
+                        MSG_ERR_POPUP_6_2ND_LINE,
+                        MSG_ERR_POPUP_6_3RD_LINE,
+                        MSG_ERR_POPUP_6_4RD_LINE, "", "OK", (unsigned char*)icon_message_w, sizeof(icon_message_w));
+          popupShown = true;
+        }
+      }
+
+      if(popupShown) {
+        return res | REDRAW_ALL;
+      }
 
       if (sendMessageAs != NULL) {
         switch (sendMessageAs->getValue()) {
-        case 0: // Sip
+        case MessageType_t::SIP: // Sip
           sipMessage = true;
           toUri = extractAddress(toUri, MessageType_t::SIP);
           break;
-        case 1: // LoRa
+        case MessageType_t::LORA: // LoRa
           sipMessage = false;
           toUri = extractAddress(toUri, MessageType_t::LORA);
           break;
         default:
           log_e("Unknown message type: %d", sendMessageAs->getValue());
+          //TODO error popup here, needed?
         }
       }
 
@@ -6965,8 +8502,11 @@ appEventResult CreateMessageApp::processEvent(EventType event) {
         snprintf(loraAddress, sizeof(loraAddress), "%X", chipId);
         fromUri = loraAddress;
 
-        if (strncmp(toUri, "LORA:", 5) == 0) {
+        if (strncasecmp(toUri, "LORA:", 5) == 0) {
           toUri = extractAddress(toUri, MessageType_t::LORA);
+        } else {
+          //TODO error popup here, needed?
+          log_d("not starting with lora");
         }
       }
 
@@ -6984,13 +8524,35 @@ appEventResult CreateMessageApp::processEvent(EventType event) {
       flash.messages.saveMessage(message, fromUri, toUri, incoming, time);
 
       // Queue for sending
-      log_d("adding message to send queue: %d %s %s", sipMessage, fromUri, toUri);
+      log_d("adding message to send queue: %d %s %s %s", sipMessage, fromUri, toUri, message);
       MessageData* msg = new MessageData(fromUri, toUri, message, time, incoming);
 
       if (sipMessage) {
         controlState.outgoingMessages.add(msg);
       } else {
+        // if(!lora.isSendUndelivereds()) {
+        //   //the message is set as "sent" initially to avoid resending it forever.
+        //   //this choice widget is added to avoid filling the inbox of the receivers with old firmware which
+        //   //  has no ACK feature
+        //   msg->setSent();
+        // } else {
+        msg->setUnsent();
+        // }
+
         controlState.outgoingLoraMessages.add(msg);
+        if(!lora.isOn()) {
+          gui.showPopup(MSG_ERROR_POPUP_HEADER,
+                        MSG_ERR_POPUP_7_1ST_LINE,
+                        MSG_ERR_POPUP_7_2ND_LINE,
+                        MSG_ERR_POPUP_7_3RD_LINE,
+                        MSG_ERR_POPUP_7_4RD_LINE, "", "OK", (unsigned char*)icon_message_w, sizeof(icon_message_w));
+        } else {
+          for(int i=0; i<gui.state.outgoingLoraMessages.size(); i++) {
+            log_e("XXXXXXXXXXXXXXXXXXXXXXXXX i: %d text: %s timetoresend: %d\n", i,
+                  gui.state.outgoingLoraMessages[i]->getMessageText(),
+                  gui.state.outgoingLoraMessages[i]->getTimeToResend()-millis());
+          }
+        }
       }
 
       return EXIT_APP | REDRAW_ALL;       // special signal for the parent that a message was sent
@@ -7024,27 +8586,33 @@ void CreateMessageApp::redrawScreen(bool redrawAll) {
   if (sendMessageAs != NULL) {
     ((GUIWidget*)sendMessageAs)->redraw(lcd);
   }
+  setHeaderFooter();
 }
 
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - -  View Message app  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-ViewMessageApp::ViewMessageApp(int32_t messageOffset, LCD& lcd, ControlState& state, Storage& flash, HeaderWidget* header, FooterWidget* footer)
+ViewMessageApp::ViewMessageApp(int32_t messageOffset, LCD& lcd, ControlState& state, Storage& flash, HeaderWidget* header
+                               , FooterWidget* footer, MessagesApp::MessagesState_t inboxOrOutbox)
   : WindowedApp(lcd, state, header, footer), flash(flash), messageOffset(messageOffset) {
   log_i("create ViewMessageApp: messageOffset = %d", messageOffset);
 
   const int16_t padding =  4;
   textArea = new MultilineTextWidget(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(),
-                                     "Empty message", state, 10000, fonts[OPENSANS_COND_BOLD_20], InputType::AlphaNum, padding, padding);
+                                     _("Empty message"), state, 10000, fonts[OPENSANS_COND_BOLD_20], InputType::AlphaNum, padding, padding);
   textArea->setColors(WP_COLOR_0, WP_COLOR_1);
 
   // Loop over a single element in preloaded messages array: a little trick to use MessageData interface to access the message
   for (auto it = flash.messages.iteratorCount(messageOffset, 1); it.valid(); ++it) {
     textArea->setText(it->getMessageText());
-    const char* format = "%s\n\n--\nFrom:\n%s\nTo:\n%s\nTime:\n%s\n";
+    const char* format = _("%s\n\n--\nFrom:\n%s\nTo:\n%s\nTime:\n%s\n");
     char msgTime[30];
-    Clock::unixToHuman(it->getTime(), msgTime);
+    ntpClock.unixToHuman(it->getTime(), msgTime);
     char msg[strlen(it->getMessageText()) + strlen(it->getOtherUri()) + strlen(it->getOwnUri()) + strlen(format) + strlen(msgTime)];
-    sprintf(msg, format, it->getMessageText(), it->getOwnUri(), it->getOtherUri(), msgTime);
+    if (inboxOrOutbox == MessagesApp::MessagesState_t::INBOX) {
+      sprintf(msg, format, it->getMessageText(), it->getOtherUri(), it->getOwnUri(), msgTime);
+    } else {
+      sprintf(msg, format, it->getMessageText(), it->getOwnUri(), it->getOtherUri(), msgTime);
+    }
     textArea->setText(msg);
     textArea->cursorToStart();
 
@@ -7139,18 +8707,18 @@ appEventResult ViewMessageApp::processEvent(EventType event) {
 
 appEventResult ViewMessageApp::changeState(ViewMessageState_t newState) {
   if (newState == OPTIONS) {
-    header->setTitle("Options");
-    footer->setButtons("Select", "Back");
+    header->setTitle(_("Options"));
+    footer->setButtons(_("Select"), _("Back"));
     if (options == NULL) {
       options = new OptionsMenuWidget(0, header->height(), lcd.width(), lcd.height()-header->height()-footer->height());
       if (options) {
-        options->addOption("Reply",  111);
-        options->addOption("Delete", 222);
+        options->addOption(_("Reply"),  111);
+        options->addOption(_("Delete"), 222);
       }
     }
   } else if (newState == MAIN) {
-    header->setTitle("Message");
-    footer->setButtons("Options", "Back");
+    header->setTitle(_("Message"));
+    footer->setButtons(_("Options"), _("Back"));
   }
   appState = newState;
   return REDRAW_ALL;
@@ -7232,7 +8800,7 @@ void DesignDemoApp::redrawScreen(bool redrawAll) {
     sprite.setTextColor(sprite.color565(0xFF, 0x6F, 0x00), TFT_BLACK);
     sprite.setTextFont(fonts[AKROBAT_BOLD_18]);
     sprite.setCursor(8, 3);
-    sprite.printToSprite("Messages", 8);
+    sprite.printToSprite(_("Messages"), 8);
 
     // - Icons
     sprite.drawImage(icon_batt_w_5, sizeof(icon_batt_w_5), 213, 7);
@@ -7356,7 +8924,7 @@ appEventResult MicTestApp::processEvent(EventType event) {
   if (event == APP_TIMER_EVENT) {
     return REDRAW_SCREEN;
   }
-  return DO_NOTHING;
+  return DO_NOTHING | REDRAW_HEADER /*blink charge icon*/;
 }
 
 void MicTestApp::redrawScreen(bool redrawAll) {
@@ -7406,6 +8974,708 @@ void MicTestApp::redrawScreen(bool redrawAll) {
   lcd.drawFastHLine(xOff, 100, lcd.width()-xOff, TFT_BLACK);
 }
 
+#ifdef SOFTWARE_EXAMPLES
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - -   LED Example app  - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+LEDExampleApp::LEDExampleApp( LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget* footer)
+  : WindowedApp(lcd, state, header, footer) {
+  header->setTitle("LED EXAMPLE APP");
+
+  for (int i = 0; i < sizeof(LEDPINS) / sizeof(LEDPINS[0]); i++) {
+    if (i != 2) {
+      allPinMode(LEDPINS[i], OUTPUT);
+    }
+  }
+
+  footer->setButtons(NULL, "Back");
+  this->getState();
+  // Create all the widgets
+  const uint16_t spacing = 1;
+  uint16_t xOff = spacing;
+  uint16_t yOff = header->height();
+
+  // KEYPAD
+  // - row 1
+  yOff = header->height() + 15;
+  bbKeys[0] = new ButtonWidget(20, yOff, "D0", 30, 30, TFT_BLACK, greyBg, greyBorder);
+  bbKeys[1] = new ButtonWidget(70, yOff, "D1", 30, 30, TFT_BLACK, greyBg, greyBorder);
+
+  //  yOff += bbKeys[0]->height() + 35  ;
+
+  // - row 2
+  bbKeys[2] = new ButtonWidget(140, yOff, "x", 30, 30, TFT_BLACK, greyBg, greyBorder);
+  bbKeys[3] = new ButtonWidget(190, yOff, "32", 30, 30, TFT_BLACK, greyBg, greyBorder);
+  yOff += bbKeys[1]->height() + 35;
+
+  //row 3
+  bbKeys[4] = new ButtonWidget(20, yOff, "D2", 30, 30, TFT_BLACK, greyBg, greyBorder);
+  bbKeys[5] = new ButtonWidget(70, yOff, "D3", 30, 30, TFT_BLACK, greyBg, greyBorder);
+  //  yOff += bbKeys[1]->height() + 35;
+
+  // - row 3
+  bbKeys[6] = new ButtonWidget(140, yOff, "12", 30, 30, TFT_BLACK, greyBg, greyBorder);
+  bbKeys[7] = new ButtonWidget(190, yOff, "13", 30, 30, TFT_BLACK, greyBg, greyBorder);
+  yOff += bbKeys[1]->height() + 35;
+
+
+  bbKeys[8] = new ButtonWidget(20, yOff, "D4", 30, 30, TFT_BLACK, greyBg, greyBorder);
+  bbKeys[9] = new ButtonWidget(70, yOff, "D5", 30, 30, TFT_BLACK, greyBg, greyBorder);
+
+  //  yOff += bbKeys[0]->height() + 35  ;
+
+  // - row 2
+  bbKeys[10] = new ButtonWidget(140, yOff, "27", 30, 30, TFT_BLACK, greyBg, greyBorder);
+  bbKeys[11] = new ButtonWidget(190, yOff, "14", 30, 30, TFT_BLACK, greyBg, greyBorder);
+  yOff += bbKeys[1]->height() + 35;
+}
+
+LEDExampleApp::~LEDExampleApp() {
+  // all widgets must be registered and are deleted by WiPhoneApp desctructor
+
+}
+
+void LEDExampleApp::getState() {
+  //get current state of leds
+  for (int i = 0; i < sizeof(LEDPINS) / sizeof(LEDPINS[0]); i++) {
+    if (i != 2) {
+      LEDSTATE[i] = allDigitalRead(LEDPINS[i]);
+    }
+  }
+}
+
+appEventResult LEDExampleApp::processEvent(EventType event) {
+  int lim = sizeof(LEDPINS) / sizeof(LEDPINS[0]);
+  if (LOGIC_BUTTON_BACK(event) ) {
+    //ScreenShotTake();
+    return EXIT_APP;
+  }
+  appEventResult res = DO_NOTHING;
+
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
+
+  if (IS_KEYBOARD(event)) {
+    anyKeyPressed = true;
+    switch (event) {
+    case WIPHONE_KEY_UP:
+      sel = sel - 4;
+      sel = sel % 12;
+      if (sel < 0) {
+        sel += 12;
+      }
+      break;
+    case WIPHONE_KEY_SELECT:
+    case  WIPHONE_KEY_OK:
+      changeState(sel);
+      //do something
+      break;
+    case WIPHONE_KEY_LEFT:
+      sel = sel - 1;
+      sel = sel % 12;
+      if (sel < 0) {
+        sel += 12;
+      }
+      break;
+    case WIPHONE_KEY_RIGHT:
+      sel = sel + 1;
+      sel = sel % 12;
+      break;
+    case WIPHONE_KEY_DOWN:
+      sel = sel + 4;
+      sel = sel % 12;
+      break;
+    default:
+      break;
+    }
+  }
+  for (int j = 0 ; j < sizeof(LEDPINS) / sizeof(LEDPINS[0]); j++) {
+    //replace this with analog read and color change
+
+    if (LEDSTATE[j] == true || LEDSTATE[j] == HIGH) {
+      bbKeys[j]->setColors(TFT_BLACK, greenBg, greenBorder);
+    } else {
+      bbKeys[j]->setColors(TFT_BLACK, redBg, redBorder);
+    }
+
+    res |= REDRAW_SCREEN;
+  }
+  return res;
+}
+
+void LEDExampleApp::redrawScreen(bool redrawAll) {
+  if (!this->screenInited) {
+    redrawAll = true;
+  }
+
+  if (redrawAll) {
+    lcd.fillRect(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), TFT_BLACK);
+  }
+  int x = bbKeys[sel]->getParentOffX();
+  int y = bbKeys[sel]->getParentOffY();
+  int w = bbKeys[sel]->width();
+  int h = bbKeys[sel]->height();
+
+  lcd.drawRect(x - 10, y - 10, w + 20, h + 20, TFT_WHITE);
+  if (xold != x or yold != y) {
+    lcd.drawRect(xold - 10, yold - 10, w + 20, h + 20, TFT_BLACK);
+  }
+  xold = x;
+  yold = y;
+  for (int i = 0; i < sizeof(bbKeys) / sizeof(bbKeys[0]); i++) {
+    ((GUIWidget*) bbKeys[i])->refresh(lcd, redrawAll || !screenInited);
+  }
+  screenInited = true;
+}
+
+void LEDExampleApp::changeState(int i) {
+  log_d("fn::changeState() %d", i);
+  if ( i == 2) {
+    return;
+  }
+  LEDSTATE[i] = !LEDSTATE[i];
+  allDigitalWrite(LEDPINS[i], LEDSTATE[i]);
+}
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - -   Button Press Example app  - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+ButtonPressApp::ButtonPressApp( LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget* footer)
+  : WindowedApp(lcd, state, header, footer) {
+  header->setTitle("Button Press APP");
+
+  footer->setButtons(NULL, "Back");
+
+  label = new LabelWidget(0, (lcd.height() - fonts[AKROBAT_EXTRABOLD_22]->height()) / 2, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(),
+                          "Button Press App", WHITE, BLACK, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+}
+
+ButtonPressApp::~ButtonPressApp() {
+  delete label;
+  // all widgets must be registered and are deleted by WiPhoneApp desctructor
+}
+
+void ButtonPressApp::showButtonPress(String showString) {
+  log_d("");
+  String to_show = showString + " Is Pressed.";
+  //  if(label != NULL)
+  //    delete label;
+  label = new LabelWidget(0, (lcd.height() - fonts[AKROBAT_EXTRABOLD_22]->height()) / 2, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(),
+                          to_show.c_str(), WHITE, BLACK, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+  this->screenInited = false;
+}
+
+appEventResult ButtonPressApp::processEvent(EventType event) {
+  if (LOGIC_BUTTON_BACK(event) ) {
+    //ScreenShotTake();
+    return EXIT_APP;
+  }
+  appEventResult res = DO_NOTHING;
+
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
+
+  if (IS_KEYBOARD(event)) {
+    anyKeyPressed = true;
+    int i;
+    switch (event) {
+    case WIPHONE_KEY_UP:
+      showButtonPress("UP");
+      break;
+    case WIPHONE_KEY_SELECT:
+      showButtonPress("SELECT");
+      break;
+    case WIPHONE_KEY_LEFT:
+      showButtonPress("LEFT");
+      break;
+    case WIPHONE_KEY_OK:
+      showButtonPress("OK");
+      break;
+    case WIPHONE_KEY_RIGHT:
+      showButtonPress("RIGHT");
+      break;
+    case WIPHONE_KEY_BACK:
+      showButtonPress("BACK");
+      break;
+    case WIPHONE_KEY_CALL:
+      showButtonPress("CALL");
+      break;
+    case WIPHONE_KEY_DOWN:
+      showButtonPress("DOWN");
+      break;
+    case WIPHONE_KEY_END:
+      showButtonPress("END");
+      break;
+    case '1':
+      showButtonPress("1");
+      break;
+    case '2':
+      showButtonPress("2");
+      break;
+    case '3':
+      showButtonPress("3");
+      break;
+    case '4':
+      showButtonPress("4");
+      break;
+    case '5':
+      showButtonPress("5");
+      break;
+    case '6':
+      showButtonPress("6");
+      break;
+    case '7':
+      showButtonPress("7");
+      break;
+    case '8':
+      showButtonPress("8");
+      break;
+    case '9':
+      showButtonPress("9");
+      break;
+    case '*':
+      showButtonPress("*");
+      break;
+    case '0':
+      showButtonPress("0");
+      break;
+    case '#':
+      showButtonPress("#");
+      break;
+    case WIPHONE_KEY_F1:
+      showButtonPress("F1");
+      break;
+    case WIPHONE_KEY_F2:
+      showButtonPress("F2");
+      break;
+    case WIPHONE_KEY_F3:
+      showButtonPress("F3");
+      break;
+    case WIPHONE_KEY_F4:
+      showButtonPress("F4");
+      break;
+    default:
+      break;
+    }
+    res |= REDRAW_SCREEN;
+  }
+  return res;
+}
+
+void ButtonPressApp::redrawScreen(bool redrawAll) {
+  if (!this->screenInited) {
+    redrawAll = true;
+  }
+
+  if (redrawAll) {
+    lcd.fillRect(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), TFT_BLACK);
+  }
+
+  ((GUIWidget *) label)->redraw(lcd);
+
+  screenInited = true;
+}
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - -   Battery Info app  - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+BatteryApp::BatteryApp( LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget* footer)
+  : WindowedApp(lcd, state, header, footer) {
+
+  header->setTitle("Battery Info APP");
+
+  footer->setButtons(NULL, "Back");
+  String show_voltage = "Voltage: " + String(gui.state.battVoltage);    // Shows Voltage
+  String show_connection = "Charging: " + String(gui.state.usbConnected); // Shows USB connected or not
+  String show_battery = "SOC: " + String(gui.state.battSoc);        // Shows Battery is being charged or not
+  label1 = new LabelWidget(0, (lcd.height() - fonts[AKROBAT_EXTRABOLD_22]->height()) / 2.5, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(),
+                           show_battery.c_str(), WHITE, BLACK, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+  label2 = new LabelWidget(0, (lcd.height() - fonts[AKROBAT_EXTRABOLD_22]->height()) / 2, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(),
+                           show_voltage.c_str(), WHITE, BLACK, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+  label3 = new LabelWidget(0, (lcd.height() - fonts[AKROBAT_EXTRABOLD_22]->height()) / 1.5, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(),
+                           show_connection.c_str(), WHITE, BLACK, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+}
+
+BatteryApp::~BatteryApp() {
+  delete label1;
+  delete label2;
+  delete label3;
+  // all widgets must be registered and are deleted by WiPhoneApp desctructor
+}
+
+appEventResult BatteryApp::processEvent(EventType event) {
+  appEventResult res = DO_NOTHING;
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
+  if (label1 != NULL) {
+    delete label1;
+  }
+  if (label2 != NULL) {
+    delete label2;
+  }
+  if (label3 != NULL) {
+    delete label3;
+  }
+
+  String show_voltage = "Voltage: " + String(gui.state.battVoltage);    // Shows Voltage
+  String show_connection = "Charging: " + String(gui.state.usbConnected); // Shows USB connected or not
+  String show_battery = "SOC: " + String(gui.state.battSoc);        // Shows Battery is being charged or not
+  label1 = new LabelWidget(0, (lcd.height() - fonts[AKROBAT_EXTRABOLD_22]->height()) / 2.5, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(),
+                           show_battery.c_str(), WHITE, BLACK, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+  label2 = new LabelWidget(0, (lcd.height() - fonts[AKROBAT_EXTRABOLD_22]->height()) / 2, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(),
+                           show_voltage.c_str(), WHITE, BLACK, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+  label3 = new LabelWidget(0, (lcd.height() - fonts[AKROBAT_EXTRABOLD_22]->height()) / 1.5, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(),
+                           show_connection.c_str(), WHITE, BLACK, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+  res |= REDRAW_SCREEN;
+  if (LOGIC_BUTTON_BACK(event) ) {
+    //ScreenShotTake();
+    return EXIT_APP;
+  }
+  return res;
+}
+
+void BatteryApp::redrawScreen(bool redrawAll) {
+
+  if (!this->screenInited) {
+    redrawAll = true;
+  }
+  if (redrawAll) {
+
+    log_d("*************Redrawing the battery info app*********************************");
+    lcd.fillRect(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), TFT_BLACK);
+  }
+
+  ((GUIWidget *) label1)->redraw(lcd);
+  ((GUIWidget *) label2)->redraw(lcd);
+  ((GUIWidget *) label3)->redraw(lcd);
+  screenInited = true;
+}
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - -   LoRa Test app  - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+LoRaTestApp::LoRaTestApp( LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget* footer)
+  : WindowedApp(lcd, state, header, footer), screenInited(false) {
+  header->setTitle("LoRa Test APP");
+  footer->setButtons("Send", "Back");
+
+  state.msAppTimerEventLast = millis();
+  state.msAppTimerEventPeriod = 33;
+
+  // Create all the widgets
+  const uint16_t spacing = 1;
+  uint16_t xOff = spacing;
+  uint16_t yOff = header->height();
+
+  loraSPI = new RHSoftwareSPI();
+  rf95 = new RH_RF95(RFM95_CS, RFM95_INT, *loraSPI);
+
+  loraSPI->setPins(HSPI_MISO, HSPI_MOSI, HSPI_SCLK);
+  pinMode(RFM95_RST, OUTPUT);
+  rf95->init();
+  rf95->setFrequency(RF95_FREQ);
+  rf95->setTxPower(23, false);
+
+  label1 = new LabelWidget(0, (lcd.height() - fonts[AKROBAT_EXTRABOLD_22]->height()) / 2.5, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(),
+                           "", WHITE, BLACK, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+}
+
+LoRaTestApp::~LoRaTestApp() {
+  // all widgets must be registered and are deleted by WiPhoneApp desctructor
+  delete rf95;
+  delete loraSPI;
+}
+
+void LoRaTestApp::redrawScreen(bool redrawAll) {
+
+  if (!this->screenInited) {
+    redrawAll = true;
+  }
+  if (redrawAll) {
+    lcd.fillRect(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), TFT_BLACK);
+  }
+
+  ((GUIWidget *) label1)->redraw(lcd);
+  screenInited = true;
+}
+
+appEventResult LoRaTestApp::processEvent(EventType event) {
+  appEventResult res = DO_NOTHING;
+  if (LOGIC_BUTTON_BACK(event) ) {
+    return EXIT_APP;
+  }
+
+  if (LOGIC_BUTTON_OK(event) || (IS_KEYBOARD(event) && event == WIPHONE_KEY_LEFT)) {
+    rf95->send((uint8_t*)"PING", strlen("PING"));
+    rf95->waitPacketSent();
+  }
+
+  if (event == APP_TIMER_EVENT) {
+    if (rf95->available()) {
+      // Should be a message for us now
+      uint8_t buf[RH_RF95_MAX_MESSAGE_LEN] = {0};
+      uint8_t len = sizeof(buf);
+
+      if (rf95->recv(buf, &len)) {
+        label1->setText((char*)buf);
+        if (strcmp((char*)buf, "PING") == 0) {
+          rf95->send((uint8_t*)"PONG", strlen("PONG"));
+          rf95->waitPacketSent();
+        }
+      } else {
+        log_e("LoRa: Unable to receive data");
+      }
+    }
+  }
+
+  res |= REDRAW_SCREEN /*animate/blink charge icon*/ | REDRAW_HEADER;
+  return res;
+}
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - -   Peri Test app  - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+PeriTestApp::PeriTestApp( LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget* footer)
+  : WindowedApp(lcd, state, header, footer) {
+  header->setTitle("Peri Test APP");
+
+
+  footer->setButtons(NULL, "Back");
+
+  // Create all the widgets
+  const uint16_t spacing = 1;
+  uint16_t xOff = spacing;
+  uint16_t yOff = header->height();
+
+  // KEYPAD
+  // - row 1
+  yOff = header->height() + 80;
+  bbKeys[0] = new ButtonWidget(60, yOff, "Vibration", 120, 25, TFT_BLACK, greyBg, greyBorder);
+
+  yOff = header->height() + 140;
+  bbKeys[1] = new ButtonWidget(60, yOff, "BackLight", 120, 25, TFT_BLACK, greyBg, greyBorder);
+
+  controlState.disableAutoTurnOnKeypadLights = true;
+}
+
+PeriTestApp::~PeriTestApp() {
+  // all widgets must be registered and are deleted by WiPhoneApp desctructor
+
+  controlState.disableAutoTurnOnKeypadLights = false;
+
+}
+
+appEventResult PeriTestApp::processEvent(EventType event) {
+  int lim = sizeof(PERISTATE) / sizeof(PERISTATE[0]);
+  if (LOGIC_BUTTON_BACK(event) ) {
+    //ScreenShotTake();
+    allDigitalWrite(VIBRO_MOTOR_CONTROL, 0);
+    allDigitalWrite(KEYBOARD_LED, 0);
+    return EXIT_APP;
+  }
+  appEventResult res = DO_NOTHING;
+  bool toggleSelect = false;
+  if (IS_KEYBOARD(event)) {
+    anyKeyPressed = true;
+    switch (event) {
+    case WIPHONE_KEY_UP:
+      toggleSelect = true;
+      break;
+    case WIPHONE_KEY_SELECT:
+    case  WIPHONE_KEY_OK:
+      changeState(sel);
+      break;
+    case WIPHONE_KEY_LEFT:
+      toggleSelect = true;
+      break;
+    case WIPHONE_KEY_RIGHT:
+      toggleSelect = true;
+      break;
+    case WIPHONE_KEY_DOWN:
+      toggleSelect = true;
+      break;
+    default:
+      break;
+    }
+  }
+
+  if ( toggleSelect ) {
+    if ( sel == 0 ) {
+      sel = 1;
+    } else if ( sel == 1 ) {
+      sel = 0;
+    }
+  }
+
+  if ( toggleSelect ) {
+    log_d("Select changed %d ", sel);
+  }
+
+  for (int j = 0 ; j < sizeof(PERISTATE) / sizeof(PERISTATE[0]); j++) {
+    //replace this with analog read and color change
+    if (PERISTATE[j] == true) {
+      bbKeys[j]->setColors(TFT_BLACK, greenBg, greenBorder);
+    } else {
+      bbKeys[j]->setColors(TFT_BLACK, redBg, redBorder);
+    }
+  }
+  res |= REDRAW_SCREEN;
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
+  return res;
+}
+
+void PeriTestApp::redrawScreen(bool redrawAll) {
+  if (!this->screenInited) {
+    redrawAll = true;
+  }
+
+  if (redrawAll) {
+    lcd.fillRect(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), TFT_BLACK);
+  }
+  int x = bbKeys[sel]->getParentOffX();
+  int y = bbKeys[sel]->getParentOffY();
+  int w = bbKeys[sel]->width();
+  int h = bbKeys[sel]->height();
+
+  lcd.drawRect(x - 10, y - 10, w + 20, h + 20, TFT_WHITE);
+  if (xold != x or yold != y) {
+    lcd.drawRect(xold - 10, yold - 10, w + 20, h + 20, TFT_BLACK);
+  }
+  xold = x;
+  yold = y;
+  for (int i = 0; i < sizeof(bbKeys) / sizeof(bbKeys[0]); i++) {
+    ((GUIWidget*) bbKeys[i])->refresh(lcd, redrawAll || !screenInited);
+  }
+  screenInited = true;
+}
+void PeriTestApp::changeState(int i) {
+  log_d("fn::changeState() %d", i);
+  PERISTATE[i] = !PERISTATE[i];
+  if (i == 0) {
+    allDigitalWrite(VIBRO_MOTOR_CONTROL, PERISTATE[i]);
+  } else if (i == 1) {
+    allDigitalWrite(KEYBOARD_LED, !PERISTATE[i]);
+  }
+}
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - -   RealTimeApp app  - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+RealTimeApp::RealTimeApp( LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget* footer)
+  : WindowedApp(lcd, state, header, footer), FocusableApp(2) {
+  header->setTitle("RealTime App");
+
+  label = new LabelWidget(0, (lcd.height() - fonts[AKROBAT_EXTRABOLD_22]->height()) / 1.5, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(),
+                          "Date/Time App", WHITE, BLACK, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+  footer->setButtons(NULL, "Back");   //buttons
+  // Create all the widgets
+  const uint16_t spacing = 1;
+  uint16_t xOff = spacing;
+  uint16_t yOff = header->height();
+  // KEYPAD
+  // - row 1
+  yOff = header->height() + 80;
+  bbKeys[0] = new ButtonWidget((lcd.width() / 2 - 60 ), yOff, "Date", 120, 25, TFT_BLACK, greenBg, greenBorder);
+
+  yOff = header->height() + 130;
+  bbKeys[1] = new ButtonWidget((lcd.width() / 2 - 60), yOff, "Time", 120, 25, TFT_BLACK, greenBg, greenBorder);
+
+}
+void RealTimeApp :: showTimePress() {
+
+  String show_time = "hh/mm/ss: " + String(ntpClock.getHour()) + "/" + String(ntpClock.getMinute()) + "/" + String(ntpClock.getSecond());
+  label = new LabelWidget(0, (lcd.height() - fonts[AKROBAT_EXTRABOLD_22]->height()) / 1.5, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(),
+                          show_time.c_str(), WHITE, BLACK, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+}
+void RealTimeApp :: showDatePress() {
+  String show_time = "dd/mm/yyyy: " + String(ntpClock.getDay()) + "/" + String(ntpClock.getMonth()) + "/" + String(ntpClock.getYear());
+  label = new LabelWidget(0, (lcd.height() - fonts[AKROBAT_EXTRABOLD_22]->height()) / 1.5, lcd.width(), fonts[AKROBAT_EXTRABOLD_22]->height(),
+                          show_time.c_str(), WHITE, BLACK, fonts[AKROBAT_EXTRABOLD_22], LabelWidget::CENTER);
+}
+
+RealTimeApp::~RealTimeApp() {
+  delete label;
+}
+
+appEventResult RealTimeApp::processEvent(EventType event) {
+  if (LOGIC_BUTTON_BACK(event) ) {
+    return EXIT_APP;
+  }
+  appEventResult res = DO_NOTHING;
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
+  bool toggleSelect = false;
+  if (IS_KEYBOARD(event)) {
+    anyKeyPressed = true;
+    switch (event) {
+    case WIPHONE_KEY_UP:
+      toggleSelect = true;
+      break;
+    case WIPHONE_KEY_SELECT:
+    case  WIPHONE_KEY_OK:
+      changeState(sel);
+      break;
+    case WIPHONE_KEY_LEFT:
+      toggleSelect = true;
+      break;
+    case WIPHONE_KEY_RIGHT:
+      toggleSelect = true;
+      break;
+    case WIPHONE_KEY_DOWN:
+      toggleSelect = true;
+      break;
+    default:
+      break;
+    }
+  }
+
+  if ( toggleSelect ) {
+    if ( sel == 0 ) {
+      sel = 1;
+    } else if ( sel == 1 ) {
+      sel = 0;
+    }
+  }
+
+  if ( toggleSelect ) {
+    log_d("Select changed %d ", sel);
+  }
+
+  res |= REDRAW_SCREEN;
+  return res;
+}
+
+void RealTimeApp::redrawScreen(bool redrawAll) {
+  if (!this->screenInited) {
+    redrawAll = true;
+  }
+
+  if (redrawAll) {
+    lcd.fillRect(0, header->height(), lcd.width(), lcd.height() - header->height() - footer->height(), TFT_BLACK);
+  }
+
+  int x = bbKeys[sel]->getParentOffX();
+  int y = bbKeys[sel]->getParentOffY();
+  int w = bbKeys[sel]->width();
+  int h = bbKeys[sel]->height();
+
+  lcd.drawRect(x - 10, y - 10, w + 20, h + 20, TFT_WHITE);
+  if (xold != x or yold != y) {
+    lcd.drawRect(xold - 10, yold - 10, w + 20, h + 20, TFT_BLACK);
+  }
+  xold = x;
+  yold = y;
+  for (int i = 0; i < sizeof(bbKeys) / sizeof(bbKeys[0]); i++) {
+    ((GUIWidget*) bbKeys[i])->refresh(lcd, redrawAll || !screenInited);
+  }
+  ((GUIWidget *) label)->redraw(lcd);
+  screenInited = true;
+}
+void RealTimeApp::changeState(int i) {
+  log_d("fn::changeState() %d", i);
+  PERISTATE[i] = !PERISTATE[i];
+  if (i == 0) {
+    showDatePress();
+  } else if (i == 1) {
+    showTimePress();
+  }
+
+}
+#endif // if SOFTWARE_EXAMPLES
+
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - -  Audio recorder app  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 RecorderApp::RecorderApp(Audio* audio, LCD& lcd, ControlState& state, HeaderWidget* header, FooterWidget* footer)
@@ -7441,6 +9711,9 @@ appEventResult RecorderApp::processEvent(EventType event) {
   }
 
   appEventResult res = DO_NOTHING;
+
+  //we should animate/blink the charge icon and etc.
+  res |= REDRAW_HEADER;
 
   // Update sprite
   if (event == WIPHONE_KEY_SELECT && this->recorded && !this->recording) {
@@ -7596,12 +9869,12 @@ DiagnosticsApp::DiagnosticsApp(Audio* audio, LCD& lcd, ControlState& state)
   yOff += bUsbPresence->height() + spacing;
 
   // Row
-  bCharging = new ButtonWidget(xOff, yOff, "Discharging?", 0, 30, TFT_BLACK, greyBg, greyBorder);
+  bCharging = new ButtonWidget(xOff, yOff, _("Discharging?"), 0, 30, TFT_BLACK, greyBg, greyBorder);
   this->registerWidget(bCharging);
   xOff += bCharging->width() + spacing;
 
   lastAutonomous = !controlState.usbConnected;
-  bAutonomous = new ButtonWidget(xOff, yOff, "Autonomous", 0, 30, TFT_BLACK, lastAutonomous ? greenBg : greyBg, lastAutonomous ? greenBorder : greyBorder);
+  bAutonomous = new ButtonWidget(xOff, yOff, _("Autonomous"), 0, 30, TFT_BLACK, lastAutonomous ? greenBg : greyBg, lastAutonomous ? greenBorder : greyBorder);
   this->registerWidget(bAutonomous);
   xOff = spacing;
   yOff += bAutonomous->height() + spacing;
@@ -7610,13 +9883,13 @@ DiagnosticsApp::DiagnosticsApp(Audio* audio, LCD& lcd, ControlState& state)
   // Row
   bool inited = controlState.gaugeInited;
   //printf("Battery Gauge Inited: %s\r\n", inited? "yes" : "no");
-  bBatteryGauge = new ButtonWidget(xOff, yOff, "Gauge", 0, 30, TFT_BLACK, inited ? greenBg : redBg, inited ? greenBorder : redBorder);
+  bBatteryGauge = new ButtonWidget(xOff, yOff, _("Gauge"), 0, 30, TFT_BLACK, inited ? greenBg : redBg, inited ? greenBorder : redBorder);
   this->registerWidget(bBatteryGauge);
   xOff += bBatteryGauge->width() + spacing;
 
   inited = controlState.extenderInited;
   //printf("GPIO Extender Inited: %s\r\n", inited? "yes" : "no");
-  bGpioExtender = new ButtonWidget(xOff, yOff, "Extender", 0, 30, TFT_BLACK, inited ? greenBg : redBg, inited ? greenBorder : redBorder);
+  bGpioExtender = new ButtonWidget(xOff, yOff, _("Extender"), 0, 30, TFT_BLACK, inited ? greenBg : redBg, inited ? greenBorder : redBorder);
   this->registerWidget(bGpioExtender);
   xOff = spacing;
   yOff += bGpioExtender->height() + spacing;
@@ -7624,13 +9897,13 @@ DiagnosticsApp::DiagnosticsApp(Audio* audio, LCD& lcd, ControlState& state)
   // Row
   inited = controlState.scannerInited;
   //printf("Key Scanner Inited: %s\r\n", inited? "yes" : "no");
-  bKeyScanner = new ButtonWidget(xOff, yOff, "Scanner", 0, 30, TFT_BLACK, inited ? greenBg : redBg, inited ? greenBorder : redBorder);
+  bKeyScanner = new ButtonWidget(xOff, yOff, _("Scanner"), 0, 30, TFT_BLACK, inited ? greenBg : redBg, inited ? greenBorder : redBorder);
   this->registerWidget(bKeyScanner);
   xOff += bKeyScanner->width() + spacing;
 
   inited = controlState.codecInited;
   //printf("Audio Codec Inited: %s\r\n", inited? "yes" : "no");
-  bCodec = new ButtonWidget(xOff, yOff, "Codec", 0, 30, TFT_BLACK, inited ? greenBg : redBg, inited ? greenBorder : redBorder);
+  bCodec = new ButtonWidget(xOff, yOff, _("Codec"), 0, 30, TFT_BLACK, inited ? greenBg : redBg, inited ? greenBorder : redBorder);
   this->registerWidget(bCodec);
   xOff += bCodec->width() + spacing;
 
@@ -7673,7 +9946,7 @@ DiagnosticsApp::DiagnosticsApp(Audio* audio, LCD& lcd, ControlState& state)
   xOff = spacing;
   yOff = 15; //header->height();
   for (int i=0; i<sizeof(bbPings)/sizeof(bbPings[0]); i++) {
-    bbPings[i] = new ButtonWidget(xOff, yOff, "Pinging...", lcd.width()-spacing, 30, TFT_BLACK, greyBg, greyBorder);
+    bbPings[i] = new ButtonWidget(xOff, yOff, _("Pinging..."), lcd.width()-spacing, 30, TFT_BLACK, greyBg, greyBorder);
     this->registerWidget(bbPings[i]);
     yOff += bbPings[i]->height() + spacing;
   }
@@ -7760,6 +10033,24 @@ DiagnosticsApp::~DiagnosticsApp() {
   // all widgets must be registered and are deleted by WiPhoneApp destructor
   audio->shutdown();
   allDigitalWrite(VIBRO_MOTOR_CONTROL, LOW);
+  // allDigitalWrite(ENABLE_DAUGHTER_3V3, HIGH);
+  allPinMode(ENABLE_DAUGHTER_3V3, OUTPUT);
+  lora.setOnOff(false);
+  lora.setup();
+
+  CriticalFile ini(Storage::ConfigsFile);
+  if ((ini.load() || ini.restore()) && !ini.isEmpty()) {
+    if (!ini.hasSection("lora")) {
+      lora.setOnOff(true);
+      lora.setFrequency((float)915.0 );// can be defined in a header
+
+    } else {
+      lora.setOnOff((strcmp(ini["lora"]["onOff"], "On") == 0) ? true : false);
+      lora.setFrequency((strcmp(ini["lora"]["freq"], "915Mhz") == 0) ? (float)915.0 : (float)868.0);// can be defined in a header
+
+    }
+  }
+  ini.unload();
 }
 
 void DiagnosticsApp::updateVoltage() {
@@ -7800,26 +10091,26 @@ void DiagnosticsApp::updateVoltage() {
   bool vFalling = lastVoltages[-1] < lastVoltages[-2] && lastVoltages[-2] < lastVoltages[-3];
   bool sRising  = lastSocs[-3] != 0.0 && lastSocs[-1] > lastSocs[-2] && lastSocs[-2] > lastSocs[-3];
   bool sFalling = lastSocs[-1] < lastSocs[-2] && lastSocs[-2] < lastSocs[-3];
-  char usbState[16] = "Discharging";
+  char usbState[16] = _("Discharging");
   if ((vRising || sRising) && !(vFalling || sFalling)) {
     if (lastCharging != 1) {
-      strcpy(usbState, "Charging");
+      strcpy(usbState, _("Charging"));
       log_d("USB State: %s", usbState);
-      bCharging->setText("Charging");
+      bCharging->setText(_("Charging"));
       bCharging->setColors(TFT_BLACK, greenBg, greenBorder);
       lastCharging = 1;
     }
   } else if (!(vRising || sRising) && (vFalling || sFalling)) {
     if (lastCharging != -1) {
-      strcpy(usbState, "Discharging");
+      strcpy(usbState, _("Discharging"));
       log_d("USB State: %s", usbState);
-      bCharging->setText("Discharging");
+      bCharging->setText(_("Discharging"));
       bCharging->setColors(TFT_BLACK, redBg, redBorder);
       lastCharging = -1;
     }
   } else {
     if (lastCharging != 0) {
-      strcpy(usbState, (lastSocs[-1] > lastSocs[-2] && lastSocs[-2] != 0) ? "Charging?" : "Discharging?");
+      strcpy(usbState, (lastSocs[-1] > lastSocs[-2] && lastSocs[-2] != 0) ? _("Charging?") : _("Discharging?"));
       log_d("USB State: %s", usbState);
       bCharging->setText(usbState);
       bCharging->setColors(TFT_BLACK, yellowBg, yellowBorder);
@@ -8046,12 +10337,12 @@ void DiagnosticsApp::updatePing() {
   bool res = false;
   int received = 0;
   if (addr || host && addr.fromString(host)) {
-    snprintf(buff, sizeof(buff), "Pinging %d.%d.%d.%d", addr[0], addr[1], addr[2], addr[3]);
+    snprintf(buff, sizeof(buff), _("Pinging %d.%d.%d.%d"), addr[0], addr[1], addr[2], addr[3]);
     log_d("%s", buff);
     ping_start(addr, 3, 1, 332, 1);
     res = (received = ping_get_received()) == 3;
   } else if (host) {
-    snprintf(buff, sizeof(buff), "Pinging %s", host);
+    snprintf(buff, sizeof(buff), _("Pinging %s"), host);
     log_d("%s", buff);
     IPAddress addr = resolveDomain(host);
     ping_start(addr, 3, 1, 332, 1);
@@ -8082,7 +10373,7 @@ void DiagnosticsApp::updatePing() {
   if (nextToPing == 0 && i!=sizeof(bbPings)/sizeof(bbPings[0])-1) {
     for (int j=i+1; j<sizeof(bbPings)/sizeof(bbPings[0]); j++) {
       if (bbPings[j]) {
-        bbPings[j]->setText("No address to ping");
+        bbPings[j]->setText(_("No address to ping"));
       }
     }
     if (this->pingedAll) {
@@ -8126,6 +10417,7 @@ bool DiagnosticsApp::selfTest(void) {
   bool psram_ok = false;
   bool sd_ok = false;
   bool memtest_ok = false;
+  bool battvolt_ok = false;
   bool self_check_passed = false;
 
   printf("\r\n\r\n SELF TEST BEGIN\r\n\r\n");
@@ -8138,11 +10430,11 @@ bool DiagnosticsApp::selfTest(void) {
   ip_ok = (ipAddr[0] != 0)? true : false;
   printf("IP Address: %d.%d.%d.%d\r\n", ipAddr[0], ipAddr[1], ipAddr[2], ipAddr[3]);
   if (ip_ok) {
-    printf("Has IP: ok\r\n");
+    printf("Has IP: yes\r\n");
   } else {
-    printf("No IP: failed\r\n");
+    printf("Has IP: no\r\n");
   }
-  printf("USB State: %s\r\n", controlState.usbConnected ? "Connected" : "Unplugged");
+  printf("USB Connected: %s\r\n", controlState.usbConnected ? "yes" : "no");
   gauge_ok = controlState.gaugeInited;
   printf("Battery Gauge Inited: %s\r\n", gauge_ok? "yes" : "no");
   extender_ok = controlState.extenderInited;
@@ -8154,17 +10446,27 @@ bool DiagnosticsApp::selfTest(void) {
   psram_ok = controlState.psramInited;
   printf("PSRAM Inited: %s\r\n", psram_ok? "yes" : "no");
 
+  memtest_ok = test_memory(1);
+
   sd_ok = test_sd_card();
   printf("SD OK: %s\r\n", sd_ok? "yes" : "no");
 
-  memtest_ok = test_memory();
+//printf("Voltage = %.2f \r\n", gui.state.battVoltage);
+  if (gui.state.battVoltage <= 4.25) {
+    printf("Battery Voltage OK: yes \r\n");
+    battvolt_ok = true;
+  } else {
+    printf("Battery Voltage OK: no \r\n");
+  }
 
-  if(ip_ok && gauge_ok && extender_ok && scanner_ok && codec_ok && psram_ok && sd_ok && memtest_ok) {
+
+  if(ip_ok && gauge_ok && extender_ok && scanner_ok && codec_ok && psram_ok && sd_ok && memtest_ok && battvolt_ok) {
     self_check_passed = true;
     printf("\r\n SELF TEST PASSED\r\n\r\n");
     return true;
   }
-  printf("\r\n SELF TEST FAILED\r\n\r\n");
+  printf("\r\n SELF TEST FAILED ip_ok %d, gauge_ok %d, extender_ok %d, scanner_ok %d, codec_ok %d, psram_ok %d, sd_ok %d, memtest_ok %d, battvolt_ok %d \r\n\r\n",
+         ip_ok, gauge_ok, extender_ok, scanner_ok, codec_ok, psram_ok, sd_ok, memtest_ok, battvolt_ok);
   return false;
 }
 
@@ -8510,7 +10812,7 @@ void DiagnosticsApp::redrawScreen(bool redrawAll) {
       lcd.setTextColor(TFT_WHITE, TFT_BLACK);
       lcd.setTextSize(1.5);
       lcd.setTextFont(2);
-      lcd.drawString("Press down for more tests", 75, 280);
+      lcd.drawString(_("Press down for more tests"), 75, 280);
     }
 
   } else if (appState == NETWORKS) {
@@ -8526,16 +10828,16 @@ void DiagnosticsApp::redrawScreen(bool redrawAll) {
       lcd.setTextColor(TFT_WHITE, TFT_BLACK);
       lcd.setTextSize(2);
       lcd.setTextFont(2);
-      lcd.drawString("Front Mic", 10, 40);
-      lcd.drawString("Audio Out", 10, 90);
+      lcd.drawString(_("Front Mic"), 10, 40);
+      lcd.drawString(_("Audio Out"), 10, 90);
 
       lcd.setTextSize(1.3);
       //lcd.setTextFont(2);
-      lcd.drawString("Press this key to test:", 10, 110);
-      lcd.drawString("#1: Front Speaker", 25, 130);
-      lcd.drawString("#2: Rear Speaker", 25, 150);
-      lcd.drawString("#3: Headphones", 25, 170);
-      lcd.drawString("#4: Stop", 25, 190);
+      lcd.drawString(_("Press this key to test:"), 10, 110);
+      lcd.drawString(_("#1: Front Speaker"), 25, 130);
+      lcd.drawString(_("#2: Rear Speaker"), 25, 150);
+      lcd.drawString(_("#3: Headphones"), 25, 170);
+      lcd.drawString(_("#4: Stop"), 25, 190);
     }
     uint32_t val = audio->getMicAvg();
     uint8_t stp = 0;
@@ -8594,7 +10896,7 @@ void DiagnosticsApp::redrawScreen(bool redrawAll) {
       lcd.setTextColor(TFT_BLACK, TFT_WHITE);
       lcd.setTextSize(2);
       lcd.setTextFont(2);
-      lcd.drawString("LCD TEST", 120, 150);
+      lcd.drawString(_("LCD TEST"), 120, 150);
       screenStep = 2;
       break;
     default:
@@ -8727,7 +11029,7 @@ appEventResult ChessApp::processEvent(EventType event) {
   if (engineRunning && event == APP_TIMER_EVENT) {
     log_d("- exchange");
     if (processEngine("")) {
-      return REDRAW_SCREEN;
+      return REDRAW_SCREEN | REDRAW_HEADER /*blink charge icon*/;
     }
   } else if (IS_KEYBOARD(event)) {
     if (!(event == WIPHONE_KEY_OK || event == WIPHONE_KEY_CALL)) {
@@ -11066,7 +13368,7 @@ void MultilineTextWidget::redraw(LCD &lcd, uint16_t screenOffX, uint16_t screenO
           curPosX = lcd.textWidth(rowsDyn[i]);
         }
       }
-      drawCursor(lcd, screenOffX + xPadding + curPosX, screenOffY + yOff, widgetFont->height(), WP_COLOR_0);
+      drawCursor(lcd, screenOffX + xPadding + curPosX, screenOffY + yOff, widgetFont->height(), fgColor);
     }
 
     yOff += widgetFont->height();
@@ -11656,7 +13958,7 @@ void GUI::drawOtaUpdate() {
   lcd.setTextColor(WP_ACCENT_0, WP_COLOR_0);
   lcd.setTextFont(fonts[AKROBAT_BOLD_18]);
   lcd.setTextDatum(ML_DATUM);
-  lcd.drawString("Installing firmware update", 5, lcd.height()/2);
+  lcd.drawString(_("Installing firmware update"), 5, lcd.height()/2);
 }
 
 void GUI::drawPowerOff() {
@@ -11863,6 +14165,26 @@ bool MenuWidget::processEvent(EventType event) {
     }
     this->revealSelected();
     return true;
+  } else if(event>=32 && event<=126) {
+    // scroll down to an item starting with this character
+
+    //log_d("--- %s ---\n", options[optionSelectedIndex]->titleDyn);
+
+    //find the menu item starting with this character
+    bool found = false;
+    for(int i=0; !found && i<options.size(); i++) {
+      EventType smallCase, capitalCase;
+      smallCase = event >= 'a' ? event : (event + 32);
+      capitalCase = event <= 'Z' ? event : (event - 32);
+      if(options[i] && options[i]->titleDyn && (options[i]->titleDyn[0] == smallCase || options[i]->titleDyn[0] == capitalCase)) {
+        found = true;
+        optionSelectedIndex = i;
+      }
+    }
+    if(found) {
+      this->revealSelected();
+      return true;
+    }
   } else if (LOGIC_BUTTON_OK(event) || event==WIPHONE_KEY_RIGHT) {
     if (options.size()) {
       chosenKey = options[optionSelectedIndex]->id;

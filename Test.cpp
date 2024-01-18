@@ -1,5 +1,5 @@
 /*
-Copyright © 2019, 2020, 2021, 2022 HackEDA, Inc.
+Copyright © 2019, 2020, 2021, 2022, 2023 HackEDA, Inc.
 Licensed under the WiPhone Public License v.1.0 (the "License"); you
 may not use this file except in compliance with the License. You may
 obtain a copy of the License at
@@ -84,26 +84,271 @@ void test_cpu() {
   }
 }
 
-bool test_memory() {
-  // Linear array expansion memory test
-  bool success = true;
-  LinearArray<char, LA_INTERNAL_RAM> arr;
-  arr.add('a');
-  arr.add('z');
-  do {
-    arr[arr.size() - 1] = '\0';
-    if (arr.size() == 32768 || arr.size() == 2097152) {
-      uint32_t hash = hash_murmur(&arr[0]);
-      //printf(" - Hash(\"az...aza\") = 0x%08x (%d chars)\r\n", hash, arr.size() - 1);
-      if (hash != 0x68e52bd8 && hash != 0xd94dfa9a) {
-        success = false;
+
+bool test_memory(uint32_t num_tests) {
+
+  int num_passed = 0;
+  int num_failed = 0;
+  int num_passedIN = 0;
+  int num_failedIN = 0;
+
+  for(int test_cnt = 0; test_cnt < num_tests; test_cnt++) {
+    bool PsRam = psramFound();
+
+    uint32_t max_size_as_pow2 = 0x200000; /*2097152*/
+    uint32_t current_size = max_size_as_pow2;
+
+    char* pointersToFree[256];
+    int cnt = 0;
+    bool failed = false;
+
+    if (PsRam) {
+      log_d("PSRAM is FOUND >>>>>>>\n");
+
+      uint32_t psramsize = ESP.getPsramSize();
+
+      for (cnt = 0; cnt < 256 && !failed; cnt++) {
+        char* ramBuffer = nullptr;
+
+        uint32_t freepsramsize = ESP.getFreePsram();
+        //printf("Total PSRAM: %0.2fMB \n", psramsize / (1024.0 * 1024.0));
+        //printf("Used PSRAM: %0.2fMB \n", (psramsize - freepsramsize)/(1024.0 * 1024.0) );
+
+        uint32_t freePsramSizeTmp = freepsramsize;
+        uint32_t freesize_as_pow2 = 0;
+        bool found = false;
+        for(uint8_t bitx = 31; !found && bitx > 0; bitx --, freePsramSizeTmp <<= 1) {
+          //printf("tmp %x\n", freePsramSizeTmp);
+          if(freePsramSizeTmp & 0x80000000 /*bit 31*/) {
+            freesize_as_pow2 = 1 << (bitx);
+            break;
+          }
+        }
+
+        log_d("Free PSRAM        : %x\n", freepsramsize);
+        log_d("Free PSRAM as pow2: %x\n", freesize_as_pow2);
+
+        current_size = freesize_as_pow2;
+        while(current_size >= 4 && !ramBuffer) {
+          ramBuffer = (char*)ps_malloc(current_size);
+          log_d("ramBuffer: %p\n", ramBuffer);
+          if(!ramBuffer) {
+            current_size /= 2;
+          } else {
+            log_d("Allocated size(else): %x\n", current_size);
+            break;
+          }
+        }
+        log_d("Allocated size    : %x\n", current_size);
+
+        if(!ramBuffer) {
+          //failed = true;
+          break;
+        }
+
+        pointersToFree[cnt] = ramBuffer;
+
+        if ( (uint32_t)(&ramBuffer[0]) > 0x3F800000) {
+          //log_d("address of test buffer for external memory is valid address 0x%08x ", &ramBuffer[0]);
+        } else {
+          log_d("address of test buffer for external memory is not valid");
+          failed = true;
+          continue;
+        }
+
+        for (int i=0; i<current_size; i++) {
+          if (i%2 == 0) {
+            ramBuffer[i] = 'a';
+            ramBuffer[i+1] = '\0';
+          } else if (i%2 == 1) {
+            ramBuffer[i] = 'z';
+          }
+        }
+
+        uint32_t hash = 0x0;
+        ramBuffer[current_size-1] = '\0';
+        hash = hash_murmur(&ramBuffer[0]);
+        log_d("Hash(\"az...aza\") = 0x%08x (%d chars)\n", hash, current_size-1);
+
+        if (current_size == 4 && hash != 0xa4cfa914 ||
+            current_size == 8 && hash != 0x77ffd44f ||
+            current_size == 16 && hash != 0x6b957c09 ||
+            current_size == 32 && hash != 0x86ff19a0 ||
+            current_size == 64 && hash != 0xa6e0b37e ||
+            current_size == 128 && hash != 0x500da208 ||
+            current_size == 256 && hash != 0x7dcc6ee5 ||
+            current_size == 512 && hash != 0x6f3b3b3c ||
+            current_size == 1024 && hash != 0xb1ce41bd ||
+            current_size == 2048 && hash != 0x11379def ||
+            current_size == 4096 && hash != 0x16f47b0c ||
+            current_size == 8192 && hash != 0x9c479b7c ||
+            current_size == 16384 && hash != 0x1ea05f49 ||
+            current_size == 32768 && hash != 0x68e52bd8 ||
+            current_size == 65536 && hash != 0x85397938 ||
+            current_size == 131072 && hash != 0x16166bb7 ||
+            current_size == 262144 && hash != 0x7a4e86e5 ||
+            current_size == 524288 && hash != 0x45381506 ||
+            current_size == 1048576 && hash != 0x75c64d2c ||
+            current_size == 2097152 && hash != 0xd94dfa9a
+            /*TODO the bigger sizes can be added if bigger memory exist*/) {
+
+          failed = true;
+        }
+        log_d("EXTERNAL PSRAM TEST ||| iteration:%d part:%d -> ", test_cnt, cnt);
+        log_d("%s", (failed ? "FAILED\n" : "PASSED\n"));
+
       }
+
+      if (failed) {
+        num_failed++;
+      } else {
+        num_passed++;
+      }
+
+      //free all allocated memory
+      for(int cnt2 = 0; cnt2 < cnt; cnt2++) {
+        heap_caps_free(pointersToFree[cnt2]);
+      }
+
+      /*printf("************************************************\n");
+      printf("EXTERNAL PSRAM FINISHED AND THE RESULTS ARE :: \n");
+      printf("EXTERNAL MEMORY TEST SUMMARY: PASSED = %d, FAILED = %d\n", num_passed, num_failed);
+      printf("************************************************\n");*/
+
+    } else {
+      log_d("PSRAM NOT FOUND>>>>>");
     }
-    arr[arr.size() - 1] = 'z';
-  } while (arr.extend(&arr[0], arr.size()));
-  printf("Memory Test: %s\r\n", success ? "Passed" : "Failed");
-  return success;
+
+    log_d("<<<<<<<<<<Begin Testing Internal Memory>>>>>>>>\r\n");
+
+    max_size_as_pow2 = 0x200000; /*2097152*/
+    current_size = max_size_as_pow2;
+
+    cnt = 0;
+    failed = false;
+
+    for (cnt = 0; cnt < 256 && !failed; cnt++) {
+      uint32_t freeheap = esp_get_free_internal_heap_size();
+      //log_d("Free heap memory is :: %d", freeheap);
+
+      char* ramBuffer = nullptr;
+      bool success = true;
+
+      uint32_t freePsramSizeTmp = freeheap;
+      uint32_t freesize_as_pow2 = 0;
+      bool found = false;
+      for(uint8_t bitx = 31; !found && bitx > 0; bitx --, freePsramSizeTmp <<= 1) {
+        //printf("tmp %x\n", freePsramSizeTmp);
+        if(freePsramSizeTmp & 0x80000000 /*bit 31*/) {
+          freesize_as_pow2 = 1 << (bitx);
+          break;
+        }
+      }
+
+      log_d("Free PSRAM        : %x\n", freeheap);
+      log_d("Free PSRAM as pow2: %x\n", freesize_as_pow2);
+
+      current_size = freesize_as_pow2;
+      while(current_size >= 4 && !ramBuffer) {
+        ramBuffer = (char*)malloc(current_size);
+        log_d("ramBuffer: %p\n", ramBuffer);
+        if(!ramBuffer) {
+          current_size /= 2;
+        } else {
+          log_d("Allocated size(else): %x\n", current_size);
+          break;
+        }
+      }
+      log_d("Allocated size    : %x\n", current_size);
+
+      if(!ramBuffer) {
+        break;
+      }
+
+      pointersToFree[cnt] = ramBuffer;
+
+      if ( (uint32_t)(&ramBuffer[0]) > 0x3FF00000) {/*should not be 0x3FFE0000*/
+        //log_d("address of test buffer for external memory is valid address 0x%08x ", &ramBuffer[0]);
+      } else {
+        log_d("address of test buffer for external memory is not valid");
+        failed = true;
+        //num_failedIN++;
+        //num_failedINBecauseInternalCheck++;
+        continue;
+      }
+
+      for (int i=0; i<current_size; i++) {
+        if (i%2 == 0) {
+          ramBuffer[i] = 'a';
+          ramBuffer[i+1] = '\0';
+        } else if (i%2 == 1) {
+          ramBuffer[i] = 'z';
+        }
+      }
+
+      uint32_t hash = 0x0;
+      ramBuffer[current_size-1] = '\0';
+      hash = hash_murmur(&ramBuffer[0]);
+      log_d("Hash(\"az...aza\") = 0x%08x (%d chars)\n", hash, current_size-1);
+
+      if (current_size == 4 && hash != 0xa4cfa914 ||
+          current_size == 8 && hash != 0x77ffd44f ||
+          current_size == 16 && hash != 0x6b957c09 ||
+          current_size == 32 && hash != 0x86ff19a0 ||
+          current_size == 64 && hash != 0xa6e0b37e ||
+          current_size == 128 && hash != 0x500da208 ||
+          current_size == 256 && hash != 0x7dcc6ee5 ||
+          current_size == 512 && hash != 0x6f3b3b3c ||
+          current_size == 1024 && hash != 0xb1ce41bd ||
+          current_size == 2048 && hash != 0x11379def ||
+          current_size == 4096 && hash != 0x16f47b0c ||
+          current_size == 8192 && hash != 0x9c479b7c ||
+          current_size == 16384 && hash != 0x1ea05f49 ||
+          current_size == 32768 && hash != 0x68e52bd8 ||
+          current_size == 65536 && hash != 0x85397938 ||
+          current_size == 131072 && hash != 0x16166bb7 ||
+          current_size == 262144 && hash != 0x7a4e86e5 ||
+          current_size == 524288 && hash != 0x45381506 ||
+          current_size == 1048576 && hash != 0x75c64d2c ||
+          current_size == 2097152 && hash != 0xd94dfa9a
+          /*TODO the bigger sizes can be added if bigger memory exist*/) {
+
+        failed = true;
+      }
+      log_d("INTERNAL SRAM TEST ||| iteration:%d part:%d -> ", test_cnt, cnt);
+      log_d("%s", (failed ? "FAILED\n" : "PASSED\n"));
+
+
+    }
+
+    if (failed) {
+      num_failedIN++;
+    } else {
+      num_passedIN++;
+    }
+
+    //free all allocated memory
+    for(int cnt2 = 0; cnt2 < cnt; cnt2++) {
+      free(pointersToFree[cnt2]);
+    }
+  }
+  log_d("************************************************\n");
+  //printf("INTERNAL SRAM FINISHED AND THE RESULTS ARE :: \n");
+  log_d("INTERNAL MEMORY TEST SUMMARY: PASSED = %d, FAILED = %d\n", num_passedIN, num_failedIN);
+  log_d("************************************************\n");
+
+  log_d("************************************************\n");
+  // printf("EXTERNAL PSRAM FINISHED AND THE RESULTS ARE :: \n");
+  log_d("EXTERNAL MEMORY TEST SUMMARY: PASSED = %d, FAILED = %d\n", num_passed, num_failed);
+  log_d("************************************************\n");
+
+  printf("PSRAM Memory OK: %s\r\n", num_passed > 0 && num_failed == 0 ? "yes" : "no");
+  printf("SRAM Memory OK: %s\r\n", num_passedIN > 0 && num_failedIN == 0 ? "yes" : "no");
+
+
+  return num_passed > 0 && num_failed == 0 && num_passedIN > 0 && num_failedIN == 0;
 }
+
 
 void test_ring_buffer() {
   printf("RING BUFFER TEST\r\n");
@@ -916,7 +1161,7 @@ bool easteregg_tests(char lastKeys[], bool anyPressed) {
     tinySipUnitTest();
   } else if (!memcmp(lastKeys + 2, "211**", 5)) {    // **112##
     log_d("Easter egg = 112: memory test");
-    test_memory();
+    test_memory(1);
   } else if (!memcmp(lastKeys + 2, "311**", 5)) {    // **113##
     log_d("Easter egg = 113: test CPU");
     test_cpu();

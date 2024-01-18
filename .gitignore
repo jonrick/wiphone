@@ -5,3 +5,7 @@
 tools/RLE3_icons/*.h
 tools/RLE3_icons/*.rle3
 tools/Font3Bit/*.h
+*.json
+.vscode
+build
+*.bak

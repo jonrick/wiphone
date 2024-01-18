@@ -127,14 +127,14 @@ int fontNumber = -1; // << Use [Number] in brackets from the fonts listed.
 //                                                  the font numbers are listed when the sketch is run.
 //                |         1         2     |       Maximum filename size for SPIFFS is 31 including leading /
 //                 1234567890123456789012345        and added point size and .vlw extension, so max is 25
-String fontName = "Akrobat-Bold";  // Manually crop the filename length later after creation if needed
+String fontName = "Arial-Unicode-Bold";  // Manually crop the filename length later after creation if needed
                                      // Note: SPIFFS does NOT accept underscore in a filename!
-//String fontType = ".ttf";
-String fontType = ".otf";
+String fontType = ".ttf";
+//String fontType = ".otf";
 
 
 // Define the font size in points for the TFT_eSPI font file
-int  fontSize = 32;
+int  fontSize = 20;
 
 // Font size to use in the Processing sketch display window that pops up (can be different to above)
 int displayFontSize = fontSize;
@@ -258,8 +258,8 @@ static final int[] unicodeBlocks = {
   //0x2F00, 0x2FDF, //Kangxi Radicals, 224, 214, Han
   //0x2FF0, 0x2FFF, //Ideographic Description Characters, 16, 12, Common
   //0x3000, 0x303F, //CJK Symbols and Punctuation, 64, 64, Han (15 characters), Hangul (2 characters), Common (43 characters), Inherited (4 characters)
-  //0x3040, 0x309F, //Hiragana, 96, 93, Hiragana (89 characters), Common (2 characters), Inherited (2 characters)
-  //0x30A0, 0x30FF, //Katakana, 96, 96, Katakana (93 characters), Common (3 characters)
+  0x3040, 0x309F, //Hiragana, 96, 93, Hiragana (89 characters), Common (2 characters), Inherited (2 characters)
+  0x30A0, 0x30FF, //Katakana, 96, 96, Katakana (93 characters), Common (3 characters) 
   //0x3100, 0x312F, //Bopomofo, 48, 42, Bopomofo
   //0x3130, 0x318F, //Hangul Compatibility Jamo, 96, 94, Hangul
   //0x3190, 0x319F, //Kanbun, 16, 16, Common
@@ -271,6 +271,130 @@ static final int[] unicodeBlocks = {
   //0x3400, 0x4DBF, //CJK Unified Ideographs Extension A, 6,592, 6,582, Han
   //0x4DC0, 0x4DFF, //Yijing Hexagram Symbols, 64, 64, Common
   //0x4E00, 0x9FFF, //CJK Unified Ideographs, 20,992, 20,971, Han
+  0x3001, 0x3002,
+  0x4E0B, 0x4E0C,
+  0x4E0D, 0x4E0E,
+  0x4E2D, 0x4E2E,
+  0x4ED8, 0x4ED9,
+  0x4F5C, 0x4F5D,
+  0x4FBF, 0x4FC0,
+  0x4FDD, 0x4FDE,
+  0x4FE1, 0x4FE2,
+  0x505C,0x505D,
+  0x5143,0x5146,
+  0x5148,0x514A,
+  0x5165,0x5166,
+  0x518D,0x518E,
+  0x5199,0x519A,
+  0x51FA,0x51FB,
+  0x5207,0x5208,
+  0x5236,0x5237,
+  0x524A,0x524B,
+  0x524D,0x524E,
+  0x529B,0x529C,
+  0x52A0,0x52A1,
+  0x52B9,0x52BA,
+  0x52D5,0x52D6,
+  0x5305,0x5306,
+  0x5316,0x5317,
+  0x53D7,0x53D8,
+  0x53F7,0x53F8,
+  0x540D,0x540E,
+  0x5426,0x5427,
+  0x5668,0x5669,
+  0x5728,0x5729,
+  0x5831,0x5832,
+  0x58F0,0x58F1,
+  0x5927,0x5928,
+  0x5931,0x5932,
+  0x59CB,0x59CC,
+  0x5B58,0x5B59,
+  0x5B85,0x5B86,
+  0x5B9A,0x5B9B,
+  0x5B9B,0x5B9C,
+  0x5BFE,0x5BFF,
+  0x5C0F,0x5C10,
+  0x5E33,0x5E34,
+  0x5EF6,0x5EF7,
+  0x5F35,0x5F36,
+  0x5F85,0x5F86,
+  0x5F8B,0x5F8C,
+  0x5FA1,0x5FA2,
+  0x5FD8,0x5FD9,
+  0x5FDC,0x5FDD,
+  0x60C5,0x60C6,
+  0x614B,0x614C,
+  0x6210,0x6211,
+  0x623B,0x623C,
+  0x629E,0x629F,
+  0x62BC,0x62BD,
+  0x62D2,0x62D3,
+  0x62E1,0x62E2,
+  0x63A5,0x63A6,
+  0x653E,0x653F,
+  0x6557,0x6558,
+  0x65AD,0x65AE,
+  0x65B0,0x65B1,
+  0x65E5,0x65E6,
+  0x660E,0x660F,
+  0x6641,0x6643,
+  0x66F4,0x66F5,
+  0x6708,0x6709,
+  0x672A,0x672B,
+  0x672C,0x672D,
+  0x6A5F,0x6A60,
+  0x6B62,0x6B63,
+  0x6B63,0x6B64,
+  0x6E08,0x6E09,
+  0x6E2C,0x6E2D,
+  0x7121,0x7122,
+  0x72B6,0x72B7,
+  0x73FE,0x73FF,
+  0x753B,0x753C,
+  0x756A,0x756B,
+  0x767A,0x767B,
+  0x767D,0x767E,
+  0x771F,0x7720,
+  0x7740,0x7741,
+  0x77ED,0x77EE,
+  0x793A,0x793B,
+  0x79C1,0x79C2,
+  0x7A7A,0x7A7B,
+  0x7B26,0x7B27,
+  0x7BB1,0x7BB2,
+  0x7D61,0x7D62,
+  0x7D9A,0x7D9B,
+  0x7DE8,0x7DE9,
+  0x8005, 0x8006,
+  0x81EA, 0x81EB,
+  0x82F1, 0x82F2,
+  0x8868, 0x8869,
+  0x898B, 0x898C,
+  0x898F, 0x8990,
+  0x89E3, 0x89E4,
+  0x8A08, 0x8A09,
+  0x8A2D, 0x8A2E,
+  0x8A3A, 0x8A3B,
+  0x8A71, 0x8A72,
+  0x8A9E, 0x8A9F,
+  0x8ABF, 0x8AC0,
+  0x8FD4, 0x8FD5,
+  0x8FFD, 0x8FFE,  
+  0x9001, 0x9002,
+  0x901A, 0x901B,
+  0x901E, 0x901F,
+  0x9022, 0x9023,
+  0x9044, 0x9045,
+  0x9077, 0x9078,
+  0x914C, 0x914D,
+  0x91CE, 0x91CF,
+  0x958A, 0x958B,
+  0x9592, 0x9594,
+  0x9663, 0x9664,
+  0x96C6, 0x96C7,
+  0x96FB, 0x96FC,
+  0x9762, 0x9763,
+  0x97F3, 0x97F4,
   //0xA000, 0xA48F, //Yi Syllables, 1,168, 1,165, Yi
   //0xA490, 0xA4CF, //Yi Radicals, 64, 55, Yi
   //0xA4D0, 0xA4FF, //Lisu, 48, 48, Lisu
@@ -314,10 +438,14 @@ static final int[] unicodeBlocks = {
   //0xFE70, 0xFEFF, //Arabic Presentation Forms-B, 144, 141, Arabic (140 characters), Common (1 character)
   //0xFF00, 0xFFEF, //Halfwidth and Fullwidth Forms, 240, 225, Hangul (52 characters), Katakana (55 characters), Latin (52 characters), Common (66 characters)
   //0xFFF0, 0xFFFF, //Specials, 16, 5, Common
-
+  0xFF01, 0xFF0A,
+  0xFF1A, 0xFF1B,
+  0xFF1E, 0xFF1F,
+  
   //0x0030, 0x0039, //Example custom range (numbers 0-9)
   //0x0041, 0x005A, //Example custom range (Upper case A-Z)
   //0x0061, 0x007A, //Example custom range (Lower case a-z)
+  
 };
 
 // Here we specify particular individual Unicodes to be included (appended at end of selected range)
@@ -458,7 +586,7 @@ void setup() {
 
   // Print characters to the sketch window
   fill(0, 0, 0);
-  textFont(myFont);
+    textFont(myFont);
 
   // Set the left and top margin
   int margin = displayFontSize;
@@ -478,10 +606,15 @@ void setup() {
       int unicode = charset[index];
       float cwidth = textWidth((char)unicode) + 2;
       if ( (x + cwidth) > (width - gapx) ) break;
-
-      // Draw the glyph to the screen
-      text(new String(Character.toChars(unicode)), x, y);
-
+      if (myFont.getGlyph(charset[index]) == null)  
+        {
+          print("Char ");
+          print(hex(charset[index]));
+          println("is unavailable!");
+        } else {
+          // Draw the glyph to the screen
+          text(new String(Character.toChars(unicode)), x, y);
+        }
       // Move cursor
       x += cwidth;
       // Increment the counter
