@@ -1,0 +1,6 @@
+{
+  "platform_url": "https://wiphone.io/static/releases/arduino_platforms/package_WiPhone_index.json",
+  "fqbn": "WiPhone:esp32:wiphone",
+  "platform_name": "WiPhone:esp32",
+  "package_name": "WiPhone"
+}
