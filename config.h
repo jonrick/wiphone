@@ -15,7 +15,7 @@ governing permissions and limitations under the License.
 #ifndef _CONFIG_H
 #define _CONFIG_H
 
-#define FIRMWARE_VERSION "0.8.32"
+#define FIRMWARE_VERSION "0.8.32.he.1"
 #define BUILD_GAMES
 
 #define LORA_MESSAGING

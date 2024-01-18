@@ -2706,7 +2706,7 @@ protected:
 
     { 0, -1, _("Clock"), _("Menu"), "", GUI_APP_CLOCK },
 
-    { 1, 0, "WiPhone", _("Select"), _("Back"), GUI_ACTION_SUBMENU },
+    { 1, 0, "Hacker Edition", _("Select"), _("Back"), GUI_ACTION_SUBMENU },
 
     // Main menu items
     // TODO: call log (icons: Call_log_b/Call_log_w)
