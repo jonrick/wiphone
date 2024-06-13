@@ -1,7 +1,7 @@
 ### Cloning
 
 ```sh
-git clone http://repo.mzjtechnology.com/wiphone/wiphone-firmware WiPhone
+git clone https://github.com/jonrick/wiphone WiPhone
 cd WiPhone
 git submodule init
 git submodule update
